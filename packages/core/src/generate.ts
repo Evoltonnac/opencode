@@ -168,9 +168,18 @@ export const layer = Layer.effect(
       // Materializing also detects the type of a downloaded image from its bytes when the URL didn't say.
       const outputs = yield* Effect.forEach(response.images, (asset) =>
         asset.materialize().pipe(
-          Effect.flatMap((image) =>
-            image.base64().pipe(Effect.map((data) => ({ type: "image" as const, data, mime: image.mediaType }))),
-          ),
+          Effect.flatMap((image) => {
+            const source = image.source
+            // Provider output has already passed its strict decoder. Encode owned bytes with the runtime's
+            // native codec here, without changing the cross-runtime Asset API or its base64-source semantics.
+            const encoded =
+              source.type === "bytes"
+                ? Effect.sync(() =>
+                    Buffer.from(source.data.buffer, source.data.byteOffset, source.data.byteLength).toString("base64"),
+                  )
+                : image.base64()
+            return encoded.pipe(Effect.map((data) => ({ type: "image" as const, data, mime: image.mediaType })))
+          }),
           Effect.provideService(RequestExecutor.Service, executor),
           Effect.mapError((error) => providerError(input.model, error)),
         ),

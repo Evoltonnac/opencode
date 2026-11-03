@@ -393,7 +393,7 @@ describe("image and decision generation", () => {
           return HttpClientResponse.fromWeb(
             request,
             Response.json({
-              data: [{ b64_json: "aW1hZ2U=" }],
+              data: [{ b64_json: text && JSON.parse(text).prompt.startsWith("codec:") ? JSON.parse(text).prompt.slice(6) : "aW1hZ2U=" }],
               output_format: "png",
               usage: { input_tokens: 9, output_tokens: 272 },
             }),
@@ -447,6 +447,19 @@ describe("image and decision generation", () => {
       })
     }),
   )
+
+  for (const invalid of ["AQ", "AQ-_", "AQ I", "A=ID", "%%%%"]) {
+    mediaIt.effect(`preserves strict provider base64 rejection for ${invalid}`, () =>
+      Effect.gen(function* () {
+        const generate = yield* Generate.Service
+        const error = yield* generate
+          .image({ model: ref("openai", "gpt-image-1-mini"), prompt: `codec:${invalid}` })
+          .pipe(Effect.flip)
+        expect(error._tag).toBe("Generate.ProviderRequestError")
+        expect(error.message).toContain("invalid base64")
+      }),
+    )
+  }
 
   mediaIt.effect("keeps credential metadata out of image requests", () =>
     Effect.gen(function* () {
