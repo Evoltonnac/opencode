@@ -366,3 +366,31 @@ it.effect("interrupted execute sends its latest progress rows before it settles"
     ])
   }),
 )
+
+it.effect("interrupted concurrent large calls retain exact arguments and bounded final progress", () =>
+  Effect.gen(function* () {
+    const started = yield* Deferred.make<void>()
+    const received: Array<number> = []
+    const progress: Array<Tool.Metadata> = []
+    const tool: Info = {
+      name: "large_wait", description: "Synthetic in-process wait",
+      input: Schema.Struct({ base64: Schema.String, title: Schema.String }), output: Schema.String,
+      execute: (input) => Effect.gen(function* () {
+        received.push(input.base64.length)
+        if(received.length===2)yield* Deferred.succeed(started,undefined)
+        return yield* Effect.never
+      }),
+    }
+    const fiber = yield* createCodeMode(new Map([[tool.name,tool]])).execute({
+      code:'const base64="A".repeat(1048576);return await Promise.allSettled([tools.large_wait({base64,title:"一.png"}),tools.large_wait({base64,title:"二.png"})])',
+    }, { ...context, progress: (update) => Effect.sync(() => progress.push(update)) })
+      .pipe(Effect.forkChild({startImmediately:true}))
+    yield* Deferred.await(started)
+    yield* Fiber.interrupt(fiber)
+    yield* TestClock.adjust("1 second")
+    expect(received).toEqual([1048576,1048576])
+    expect(progress.at(-1)?.toolCalls.map((call:{status:string})=>call.status)).toEqual(["error","error"])
+    expect(progress.at(-1)?.toolCalls.map((call:{input:{title:string}})=>call.input.title)).toEqual(["一.png","二.png"])
+    for(const update of progress)expect(Buffer.byteLength(JSON.stringify(update))).toBeLessThan(2048)
+  }),
+)

@@ -18,6 +18,7 @@ import { Permission } from "../permission.js"
 import { CodeModeCatalog } from "./catalog.js"
 import { CodeModeExecution } from "./execution.js"
 import { CodeModeFetch } from "./fetch.js"
+import { CodeModeDisplayInput } from "./display-input.js"
 
 const ExecuteFile = Schema.Struct({
   data: Schema.String,
@@ -208,7 +209,7 @@ function progressHooks(record: (update: (items: Array<ExecuteCall>) => Array<Exe
     "extension.before": (call) => {
       switch (call.name) {
         case "fetch":
-          return start(call, { tool: call.name, status: "running", input: CodeModeFetch.display(call.args) })
+          return start(call, { tool: call.name, status: "running", input: displayInput(CodeModeFetch.display(call.args)) })
         default:
           return Effect.void
       }
@@ -395,10 +396,7 @@ export function qualifiedName(registration: Info) {
 
 // Tool inputs arrive as parsed JSON, so the JSON value cast is a boundary fact.
 function displayInput(input: unknown): Record<string, typeof Schema.Json.Type> | undefined {
-  if (input === null || input === undefined) return
-  if (typeof input !== "object" || Array.isArray(input)) return { input: input as typeof Schema.Json.Type }
-  if (Object.keys(input).length === 0) return
-  return input as Record<string, typeof Schema.Json.Type>
+  return CodeModeDisplayInput.summarize(input)
 }
 
 function formatResult(result: CodeMode.Result) {
