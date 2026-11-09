@@ -1,3 +1,6 @@
+import { useServerSDK } from "@/runtime/server/client"
+import { SettingsPairing } from "../pairing/pairing"
+import { ServerProvider } from "@/runtime/server/current"
 import { Button } from "@opencode/ui/button"
 import { useDialog } from "@opencode/ui/context/dialog"
 import { createMemo, For, Show, type Component } from "solid-js"
@@ -34,12 +37,17 @@ export const SettingsServerGeneral: Component<{ entry: SettingsServer; onAddServ
 
         <Show when={serverPagesConnection(props.entry.availability)} keyed>
           {(server) => (
-            <section class="settings-section">
-              <h3 class="settings-section-title">{language.t("settings.tab.preferences")}</h3>
-              <SettingsList>
-                <ServerShell server={server} />
-              </SettingsList>
-            </section>
+            <>
+              <section class="settings-section">
+                <h3 class="settings-section-title">{language.t("settings.tab.preferences")}</h3>
+                <SettingsList>
+                  <ServerShell server={server} />
+                </SettingsList>
+              </section>
+              <ServerProvider conn={server}>
+                <ServerPairing />
+              </ServerProvider>
+            </>
           )}
         </Show>
       </div>
@@ -80,6 +88,13 @@ export const SettingsServerList: Component<{
                   )}
                 </Show>
               </SettingsList>
+              <Show when={serverPagesConnection(entry.availability)} keyed>
+                {(server) => (
+                  <ServerProvider conn={server}>
+                    <ServerPairing />
+                  </ServerProvider>
+                )}
+              </Show>
             </section>
           )}
         </For>
@@ -161,4 +176,14 @@ function ServerShell(props: { server: ServerConnection.Any; action?: string }) {
   const controller = createServerShellController(() => props.server)
 
   return <ShellSetting controller={controller} action={props.action} />
+}
+
+function ServerPairing() {
+  const server = useServerSDK()
+  const api = () => {
+    server.connection.status()
+    server.connection.attempt()
+    return server.api
+  }
+  return <SettingsPairing api={api()} />
 }

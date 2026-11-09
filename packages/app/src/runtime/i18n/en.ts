@@ -1,6 +1,22 @@
 import { DESKTOP_NATIVE_ENGLISH } from "./desktop-native"
 
 export const dict = {
+  "settings.pairing.title": "Pairing",
+  "settings.pairing.warning":
+    "Anyone with this code can gain full access to this server, including all projects, files, and command execution. Share it only with a trusted device.",
+  "settings.pairing.instructions":
+    "Generate a one-use code for this server, then enter it on the device you want to connect. The code does not make the server reachable from another network.",
+  "settings.pairing.code": "Pairing code",
+  "settings.pairing.expires": "Expires in {{time}}",
+  "settings.pairing.generate": "Generate pairing code",
+  "settings.pairing.generating": "Generating…",
+  "settings.pairing.clear": "Clear",
+  "settings.pairing.clearNotice":
+    "Clearing or leaving this page only hides the code. An issued code remains valid until used or expired.",
+  "settings.pairing.failed": "Could not generate a pairing code. Check your server connection and try again.",
+  "settings.pairing.timeout":
+    "The request timed out. A code may have been issued, but it was not received. You can try again.",
+  "settings.pairing.expired": "This code has expired. Generate a new code to connect a device.",
   "experiment.voiceCalls": "Voice calls",
   "voice.call": "Call",
   "voice.mute": "Mute",
