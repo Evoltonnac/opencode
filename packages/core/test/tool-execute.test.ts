@@ -468,7 +468,7 @@ describe.each([
             return yield* Effect.never
           }),
       }
-      const fiber = yield* createCodeMode(new Map([[tool.name, tool]]))
+      const fiber = yield* createCodeMode(new Map([[tool.name, tool]]), allowAll, vmFlag(vm))
         .execute(
           {
             code: 'const base64="A".repeat(1048576);return await Promise.allSettled([tools.large_wait({base64,title:"一.png"}),tools.large_wait({base64,title:"二.png"})])',
@@ -486,7 +486,7 @@ describe.each([
         "二.png",
       ])
       for (const update of progress) expect(Buffer.byteLength(JSON.stringify(update))).toBeLessThan(2048)
-    }).pipe(Effect.provide(vmConfig(vm))),
+    }),
   )
 })
 
