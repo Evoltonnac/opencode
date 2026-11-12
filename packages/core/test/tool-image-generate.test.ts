@@ -20,7 +20,7 @@ import { Document, Event, Info } from "@opencode/schema/config"
 import { ConfigExperimental } from "@opencode/schema/config/experimental"
 import type { ImageRequest, ImageResult } from "@opencode/schema/generate"
 import { Global } from "@opencode/util/global"
-import { Effect, Layer, Schedule, Stream } from "effect"
+import { Deferred, Effect, Layer, Schedule, Stream } from "effect"
 import { testEffect } from "./lib/effect"
 import { permissionLayer } from "./lib/permission"
 import { executeTool, toolDefinitions, toolIdentity } from "./lib/tool"
@@ -39,6 +39,7 @@ const fixture = {
   gate: Effect.void as Effect.Effect<void>,
   failure: undefined as Generate.Error | undefined,
   deny: undefined as string | undefined,
+  permissionGate: (_input: Permission.AssertInput) => Effect.void as Effect.Effect<void>,
 }
 
 const it = testEffect(
@@ -47,6 +48,7 @@ const it = testEffect(
       assertNotDenied: (input) => Effect.sync(() => void fixture.checked.push(input)),
       assert: (input) =>
         Effect.sync(() => void fixture.assertions.push(input)).pipe(
+          Effect.andThen(Effect.suspend(() => fixture.permissionGate(input))),
           Effect.andThen(
             fixture.deny === input.action
               ? Effect.fail(
@@ -93,6 +95,7 @@ const setup = (providerID = "test") =>
     fixture.gate = Effect.void
     fixture.failure = undefined
     fixture.deny = undefined
+    fixture.permissionGate = () => Effect.void
     const plugins = yield* Plugin.Service
     const sessions = yield* Session.Service
     const location = yield* Location.Service
@@ -349,6 +352,70 @@ describe("experimental_image_generate", () => {
     }),
   )
 
+  it.live("queues reference loading behind the active image job and releases on cancellation", () =>
+    Effect.gen(function* () {
+      yield* imageModel("test", "painter", (model) => { model.capabilities.input = ["text", "image"] })
+      const { run, notice, directory } = yield* setup()
+      const entered = yield* Deferred.make<void>()
+      fixture.gate = Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))
+      const first = yield* run({ prompt: "first", path: "first.png" })
+      yield* Deferred.await(entered)
+      yield* Effect.promise(() => fs.writeFile(path.join(directory, "queued.png"), Buffer.from(PNG, "base64")))
+      const second = yield* run({ prompt: "second", images: ["queued.png"], path: "second.png" })
+      expect(fixture.requests).toHaveLength(1)
+      // An already-loaded image would survive removal; deferred loading must report it missing.
+      yield* Effect.promise(() => fs.unlink(path.join(directory, "queued.png")))
+      const jobs = yield* Job.Service
+      fixture.gate = Effect.void
+      yield* jobs.cancel(String(first.metadata?.jobID))
+      yield* notice(first)
+      expect(yield* notice(second)).toContain("File not found: queued.png")
+      expect(fixture.requests).toHaveLength(1)
+      const next = yield* run({ prompt: "next", path: "next.png" })
+      yield* notice(next)
+      expect(fixture.requests).toHaveLength(2)
+    }),
+  )
+
+  it.live("cancels a queued job without calling the image provider", () =>
+    Effect.gen(function* () {
+      yield* imageModel("test", "painter")
+      const { run, notice } = yield* setup()
+      const entered = yield* Deferred.make<void>()
+      fixture.gate = Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))
+      const first = yield* run({ prompt: "first" })
+      yield* Deferred.await(entered)
+      const second = yield* run({ prompt: "second" })
+      const jobs = yield* Job.Service
+      yield* jobs.cancel(String(second.metadata?.jobID))
+      expect(yield* notice(second)).toContain('state="cancelled"')
+      expect(fixture.requests).toHaveLength(1)
+      yield* jobs.cancel(String(first.metadata?.jobID))
+      yield* notice(first)
+    }),
+  )
+
+  it.live("does not hold the image queue while awaiting an alternate output file permission", () =>
+    Effect.gen(function* () {
+      yield* imageModel("test", "painter")
+      const { run, notice, directory } = yield* setup()
+      fixture.result = { images: [{ type: "image", data: JPEG, mime: "image/jpeg" }] }
+      yield* Effect.promise(() => fs.writeFile(path.join(directory, "first.jpg"), "existing"))
+      const entered = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      fixture.permissionGate = (input) => input.action === "edit" && input.resources.includes("first.jpg")
+        ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)))
+        : Effect.void
+      const first = yield* run({ prompt: "first", path: "first.png" })
+      yield* Deferred.await(entered)
+      const second = yield* run({ prompt: "second", path: "second.png" })
+      expect(yield* notice(second)).toContain('state="completed"')
+      expect(fixture.requests).toHaveLength(2)
+      yield* Deferred.succeed(release, undefined)
+      expect(yield* notice(first)).toContain('state="completed"')
+    }),
+  )
+
   it.live("starts no job when a permission is denied", () =>
     Effect.gen(function* () {
       yield* imageModel("test", "painter")
@@ -460,12 +527,14 @@ describe("experimental_image_generate", () => {
   it.live("rejects input files that are not images", () =>
     Effect.gen(function* () {
       yield* imageModel("test", "painter")
-      const { run, directory } = yield* setup()
+      const { run, notice, directory } = yield* setup()
       yield* Effect.promise(() => fs.writeFile(path.join(directory, "notes.txt"), "hello"))
-      expect(failure(yield* run({ prompt: "x", images: ["notes.txt"] }))).toBe(
-        "notes.txt is not a PNG, JPEG, WebP or GIF image.",
-      )
-      expect(failure(yield* run({ prompt: "x", images: ["missing.png"] }))).toBe("File not found: missing.png")
+      const invalid = yield* run({ prompt: "x", images: ["notes.txt"] })
+      expect(yield* notice(invalid)).toContain("notes.txt is not a PNG, JPEG, WebP or GIF image.")
+      const missing = yield* run({ prompt: "x", images: ["missing.png"] })
+      // Missing paths can fail during authorization or deferred filesystem read.
+      if (missing.status === "error") expect(failure(missing)).toBe("File not found: missing.png")
+      else expect(yield* notice(missing)).toContain("File not found: missing.png")
       expect(fixture.requests).toEqual([])
     }),
   )

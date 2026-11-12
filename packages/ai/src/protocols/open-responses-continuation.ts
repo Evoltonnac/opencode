@@ -51,15 +51,24 @@ const checkpointValue = (checkpoint: ChannelCheckpoint | undefined): CheckpointV
   }
 }
 
-const canonical = (value: unknown): string => {
-  if (value === undefined) return "undefined"
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`
-  if (!ProviderShared.isRecord(value)) return ProviderShared.encodeJson(value)
-  return `{${Object.keys(value)
-    .filter((key) => value[key] !== undefined)
-    .sort()
-    .map((key) => `${ProviderShared.encodeJson(key)}:${canonical(value[key])}`)
-    .join(",")}}`
+// Compare canonical JSON structurally: serializing inline media just to compare it creates
+// another full Base64-sized string on both sides of every continuation step.
+const equivalent = (left: unknown, right: unknown): boolean => {
+  if (left === right) return true
+  if (typeof left === "string" || typeof right === "string") return false
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false
+    return left.every((value, index) => equivalent(value, right[index]))
+  }
+  if (ProviderShared.isRecord(left) || ProviderShared.isRecord(right)) {
+    if (!ProviderShared.isRecord(left) || !ProviderShared.isRecord(right)) return false
+    const a = Object.keys(left).filter((key) => left[key] !== undefined).sort()
+    const b = Object.keys(right).filter((key) => right[key] !== undefined).sort()
+    return a.length === b.length && a.every((key, index) => key === b[index] && equivalent(left[key], right[key]))
+  }
+  // Retain JSON's primitive normalization, e.g. -0 and non-finite numbers.
+  const encode = (value: unknown) => value === undefined ? "undefined" : ProviderShared.encodeJson(value)
+  return encode(left) === encode(right)
 }
 
 const json = (value: unknown) => {
@@ -108,10 +117,10 @@ const incremental = (
   const input = request.input
   const previousInput = checkpoint.request.input
   if (!Array.isArray(input) || !Array.isArray(previousInput)) return undefined
-  if (canonical(invariant(request)) !== canonical(invariant(checkpoint.request))) return undefined
+  if (!equivalent(invariant(request), invariant(checkpoint.request))) return undefined
   const baseline = [...previousInput, ...checkpoint.output]
   if (input.length <= baseline.length) return undefined
-  if (!baseline.every((item, index) => canonical(comparable(item)) === canonical(comparable(input[index]))))
+  if (!baseline.every((item, index) => equivalent(comparable(item), comparable(input[index]))))
     return undefined
   return input.slice(baseline.length)
 }
