@@ -149,7 +149,7 @@ describe("Image.Photon", () => {
     }),
   )
 
-  it.live("terminates the worker once it has been idle", () =>
+  it.live("terminates each completed batch before returning and starts fresh for the next", () =>
     Effect.gen(function* () {
       const spawned = yield* Ref.make(0)
       const exited = yield* Deferred.make<void>()
@@ -159,16 +159,11 @@ describe("Image.Photon", () => {
             Effect.sync(() => worker.once("exit", () => Deferred.doneUnsafe(exited, Effect.void))),
           ),
         ),
-        200,
       )
       const small = { ...limits, maxWidth: 200, maxHeight: 200 }
       yield* normalize("fixture.png", content, small)
-      yield* normalize("fixture.png", content, small)
       expect(yield* Ref.get(spawned)).toBe(1)
-      expect(yield* Deferred.isDone(exited)).toBe(false)
-
-      yield* Deferred.await(exited)
-
+      expect(yield* Deferred.isDone(exited)).toBe(true)
       yield* normalize("fixture.png", content, small)
       expect(yield* Ref.get(spawned)).toBe(2)
     }),
