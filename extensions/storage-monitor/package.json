@@ -1,0 +1,13 @@
+{
+  "name": "mhxing-opencode-storage-monitor",
+  "version": "1.1.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "bun check --no-script -p tsconfig.json",
+    "build": "bun build index.ts --target=bun --format=esm --external @opencode/plugin --external '@opencode/plugin/*' --outfile dist/index.js && bun build worker.js --target=bun --format=esm --outfile dist/worker.js && cp package.json dist/package.json",
+    "test": "bun test usage.test.ts settings.test.ts"
+  },
+  "exports": {
+    ".": "./index.js"
+  }
+}

@@ -3,6 +3,51 @@ import en from "./en"
 type Keys = keyof typeof en
 
 export const dict = {
+  "settings.pairing.title": "配对",
+  "settings.pairing.warning": "持有码的人可访问此服务器的项目、文件并执行命令。请仅与可信设备分享。",
+  "settings.pairing.instructions": "生成一次性配对码，在要连接的设备上输入。该设备仍需能够访问此服务器。",
+  "settings.pairing.code": "配对码",
+  "settings.pairing.expires": "{{time}} 后过期",
+  "settings.pairing.generate": "生成配对码",
+  "settings.pairing.generating": "正在生成…",
+  "settings.pairing.clear": "隐藏",
+  "settings.pairing.clearNotice": "隐藏或离开此页不会撤销配对码；配对码在使用后或过期时失效。",
+  "settings.pairing.failed": "无法生成配对码，请检查服务器连接后重试。",
+  "settings.pairing.timeout": "请求超时。配对码可能已生成，但尚未收到。请重试。",
+  "settings.pairing.expired": "配对码已过期，请重新生成。",
+  "settings.storage.title": "存储空间",
+  "settings.storage.refresh": "刷新",
+  "settings.storage.refreshing": "正在刷新…",
+  "settings.storage.loading": "正在读取存储用量…",
+  "settings.storage.failed": "暂时无法读取存储用量，请刷新重试。",
+  "settings.storage.stale": "刷新失败，当前显示上次统计。",
+  "settings.storage.used": "已使用 {{used}} / {{capacity}}",
+  "settings.storage.reference": "参考上限用于用量提示，不限制写入，也不会自动清理。",
+  "settings.storage.capacity": "参考上限（GB）",
+  "settings.storage.invalidCapacity": "请输入 0.001–1024 的数值，最多三位小数。",
+  "settings.storage.save": "保存",
+  "settings.storage.saving": "正在保存…",
+  "settings.storage.cancel": "取消",
+  "settings.storage.confirming": "正在确认保存结果…",
+  "settings.storage.saved": "参考上限已保存。",
+  "settings.storage.saveUnknown": "暂时无法确认是否已保存，请刷新确认。",
+  "settings.storage.partial": "部分内容暂时无法统计，当前显示已统计的用量。",
+  "settings.storage.details": "用量明细",
+  "settings.storage.scope":
+    "统计此服务器的对话及相关文件。程序、插件、配置、凭据、共享数据库元数据和备份未计入。工作区文件包含用户创建的文件。",
+  "settings.storage.freePages":
+    "数据库空页可复用，删除会话后文件不一定立即缩小。数据库日志由 OpenCode 管理，请勿直接删除数据库文件。",
+  "settings.storage.updated": "更新于 {{time}}",
+  "settings.storage.sessions": "会话数",
+  "settings.storage.messages": "消息数",
+  "settings.storage.category.conversations": "对话与附件",
+  "settings.storage.category.cache": "可再生缓存",
+  "settings.storage.category.databaseFree": "数据库可复用空页",
+  "settings.storage.category.databaseJournal": "数据库日志",
+  "settings.storage.category.toolOutput": "工具输出",
+  "settings.storage.category.logs": "运行日志",
+  "settings.storage.category.temporary": "临时文件",
+  "settings.storage.category.workspace": "工作区文件",
   "desktop.menu.app": "OpenCode",
   "desktop.menu.file": "文件",
   "desktop.menu.edit": "编辑",
@@ -111,7 +156,6 @@ export const dict = {
 
   "command.input.focus": "聚焦输入框",
 
-
   "command.review.toggle": "切换审查",
 
   "command.message.previous": "上一条消息",
@@ -201,7 +245,6 @@ export const dict = {
   "provider.connect.toast.connected.title": "{{provider}} 已连接",
   "provider.connect.toast.connected.description": "现在可以使用 {{provider}} 模型了。",
 
-
   "provider.disconnect.toast.disconnected.title": "{{provider}} 已断开连接",
   "provider.disconnect.toast.disconnected.description": "{{provider}} 模型已不再可用。",
   "provider.disconnect.toast.noCredentials.description": "未找到 {{provider}} 的可移除凭据。",
@@ -265,7 +308,6 @@ export const dict = {
 
   "dialog.mcp.title": "MCP 服务器",
   "dialog.mcp.empty": "未配置 MCP 服务器",
-
 
   "dialog.fork.empty": "没有可用于创建新会话的消息",
 

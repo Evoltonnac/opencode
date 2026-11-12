@@ -1,5 +1,6 @@
 import { useServerSDK } from "@/runtime/server/client"
 import { SettingsPairing } from "../pairing/pairing"
+import { SettingsStorage } from "../storage/storage"
 import { ServerProvider } from "@/runtime/server/current"
 import { Button } from "@opencode/ui/button"
 import { useDialog } from "@opencode/ui/context/dialog"
@@ -180,10 +181,18 @@ function ServerShell(props: { server: ServerConnection.Any; action?: string }) {
 
 function ServerPairing() {
   const server = useServerSDK()
+
   const api = () => {
     server.connection.status()
     server.connection.attempt()
+
     return server.api
   }
-  return <SettingsPairing api={api()} />
+
+  return (
+    <>
+      <SettingsStorage api={api()} event={server.event} />
+      <SettingsPairing api={api()} />
+    </>
+  )
 }

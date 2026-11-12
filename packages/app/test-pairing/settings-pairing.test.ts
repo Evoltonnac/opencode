@@ -44,9 +44,7 @@ test("pairing only issues explicit requests and hides late results after target 
   )
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
   const generate = () => {
-    const button = Array.from(root.querySelectorAll("button")).find((item) =>
-      item.textContent?.includes("Generate pairing code"),
-    )
+    const button = Array.from(root.querySelectorAll("button")).find((item) => item.textContent?.includes("生成配对码"))
     expect(button).toBeDefined()
     button!.click()
     button!.click()
@@ -71,9 +69,9 @@ test("pairing only issues explicit requests and hides late results after target 
     replies[1].resolve(Response.json({ code: "BARE-CODE", expires_in: 60 }))
     await settle()
     expect(root.querySelector("input")?.value).toBe("BARE-CODE")
-    expect(root.textContent).toContain("Expires in")
-    expect(root.textContent).toContain("full access to this server")
-    const clear = Array.from(root.querySelectorAll("button")).find((item) => item.textContent === "Clear")
+    expect(root.textContent).toContain("后过期")
+    expect(root.textContent).toContain("访问此服务器的项目")
+    const clear = Array.from(root.querySelectorAll("button")).find((item) => item.textContent === "隐藏")
     clear!.click()
     expect(root.querySelector("input")).toBeNull()
     generate()
