@@ -33,7 +33,7 @@ export type Boundary = "latest" | "local" | Model.Ref
 
 /** A completed provider compaction, which replays `native.messages` instead of a summary. */
 export const isNativeCompaction = (
-  message: SessionMessage.Info,
+  message: SessionStored.Message,
 ): message is SessionMessage.CompactionCompleted & { readonly native: { readonly messages: unknown } } =>
   message.type === "compaction" && message.status === "completed" && message.native?.messages !== undefined
 
@@ -44,7 +44,7 @@ const decodesWindow = (messages: unknown) => Option.isSome(decodeNativeWindow(me
 
 // Like other native data, a window only replays on the model that made it. One that no longer decodes, for example
 // a malformed one from a compaction hook, is skipped the same way instead of failing the session.
-const replayable = (message: SessionMessage.Info, boundary: Boundary) =>
+const replayable = (message: SessionStored.Message, boundary: Boundary) =>
   !isNativeCompaction(message) ||
   boundary === "latest" ||
   (boundary !== "local" &&
@@ -238,10 +238,10 @@ const messageEntries = Effect.fnUntraced(function* (
  * history rebuilds their text from the messages between that one and the compaction, in memory only (see
  * `SessionRecentText.kept`). Compactions written before the reference have none and keep the text they stored.
  */
-const withRecentText = Effect.fnUntraced(function* (
+const withRecentText = Effect.fnUntraced(function* <M extends SessionStored.Message>(
   db: DatabaseService,
   sessionID: SessionSchema.ID,
-  entries: ReadonlyArray<{ readonly seq: number; readonly message: SessionMessage.Info }>,
+  entries: ReadonlyArray<{ readonly seq: number; readonly message: M }>,
 ) {
   const first = entries[0]
   const compaction = first?.message
@@ -282,6 +282,58 @@ export const load = Effect.fn("SessionHistory.load")(function* (
   return (yield* messageEntries(db, sessionID, boundary)).map((entry) => entry.message)
 })
 
+type AwaitedModelRows = Effect.Success<ReturnType<typeof SessionBlob.modelRows>>
+
+const modelEntries = Effect.fnUntraced(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+  boundary: Boundary,
+  before?: number,
+): Effect.fn.Return<
+  {
+    readonly entries: ReadonlyArray<{ readonly seq: number; readonly message: SessionStored.Message }>
+    readonly media: AwaitedModelRows
+  },
+  MessageDecodeError
+> {
+  const compaction = yield* latestCompaction(db, sessionID, boundary, before)
+  const rows = yield* db
+    .select()
+    .from(SessionMessageTable)
+    .where(
+      and(
+        eq(SessionMessageTable.session_id, sessionID),
+        compaction ? gte(SessionMessageTable.seq, compaction.seq) : undefined,
+      ),
+    )
+    .orderBy(asc(SessionMessageTable.seq))
+    .all()
+    .pipe(Effect.orDie)
+  const media = yield* SessionBlob.modelRows(db, yield* withParts(db, rows))
+  const decoded = yield* Effect.forEach(
+    media.rows,
+    (row) => decodeStoredRow(row).pipe(Effect.map((message) => ({ seq: row.seq, message }))),
+    { concurrency: 1 },
+  )
+  // A window that cannot replay leaves nothing to start from, so read from the compaction before it.
+  const start = decoded[0]
+  if (compaction && start && !replayable(start.message, boundary))
+    return yield* modelEntries(db, sessionID, boundary, compaction.seq)
+  const entries = compaction ? yield* withRecentText(db, sessionID, decoded) : decoded
+  // Re-expansion may cross a native checkpoint whose completion already advanced the instruction
+  // epoch: the baseline supersedes the chronological updates before it. Forks seed their baseline
+  // at sequence 0 but retain parent sequences, so the copied checkpoint still retires them.
+  const native = entries.findLast((entry) => isNativeCompaction(entry.message))
+  // Skipped native checkpoints are not textual summaries. Their original transcript remains available.
+  return {
+    media,
+    entries: entries.filter(
+      (entry) =>
+        !(entry.message.type === "system" && native && entry.seq < native.seq) && replayable(entry.message, boundary),
+    ),
+  }
+})
+
 export const entriesForRunner = Effect.fn("SessionHistory.entriesForRunner")(function* (
   db: DatabaseService,
   sessionID: SessionSchema.ID,
@@ -291,10 +343,11 @@ export const entriesForRunner = Effect.fn("SessionHistory.entriesForRunner")(fun
   return yield* db
     .transaction(() =>
       Effect.gen(function* () {
-        const messages = yield* messageEntries(db, sessionID, boundary)
+        const history = yield* modelEntries(db, sessionID, boundary)
         return {
           initial: yield* InstructionState.initial(db, sessionID, instructions),
-          entries: messages,
+          entries: history.entries,
+          media: history.media,
         }
       }),
     )

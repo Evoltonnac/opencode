@@ -1,3 +1,5 @@
+import * as ModelMedia from "./model-media.js"
+import type { SessionStored } from "./stored.js"
 export * as SessionModelRequest from "./model-request.js"
 
 import {
@@ -48,7 +50,7 @@ import type { SessionMessage } from "./message.js"
 
 const IMAGE_BYTES_TRIGGER = 25 * 1024 * 1024 // 25 MiB
 const IMAGE_BYTES_TARGET = 15 * 1024 * 1024 // 15 MiB
-const IMAGE_REMOVED =
+export const IMAGE_REMOVED =
   "[This image was removed to reduce the request size and is no longer visible. Do not make claims about its contents from memory. If needed, retrieve it again with an available tool or ask the user to attach it again.]"
 // Used when the catalog has no output limit for the model.
 const OUTPUT_TOKEN_FALLBACK = 32_000
@@ -84,6 +86,7 @@ export interface Input {
   readonly tools?: Tool.Snapshot
   readonly system: Array<SystemPart>
   readonly messages: Array<Message>
+  readonly planned?: { readonly messages: readonly ModelMedia.PlannedMessage[]; readonly resolver: ModelMedia.Resolver }
   readonly toolChoice?: LLM.LLMRequestInput["toolChoice"]
   /** Only the durable runner may use a stateful WebSocket. */
   readonly webSocket?: "session"
@@ -127,6 +130,15 @@ export const baseTranscript = (input: {
   }
 }
 
+export const plannedTranscript = (
+  input: Omit<Parameters<typeof baseTranscript>[0], "messages"> & {
+    readonly messages: readonly SessionStored.Message[]
+  },
+) => {
+  const base = baseTranscript({ ...input, messages: [] })
+  return { ...base, messages: ModelMedia.plan(input.messages, input.model.ref, base.providerMetadataKey) }
+}
+
 const mimeToModality = (mime: string) => {
   if (mime.startsWith("image/")) return "image"
   if (mime.startsWith("audio/")) return "audio"
@@ -137,7 +149,7 @@ const mimeToModality = (mime: string) => {
 // xAI rejects any other image type (e.g. GIF) with invalid_image, and the stored image would fail every later turn.
 const XAI_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/webp"])
 
-const unsupportedMedia = (
+export const unsupportedMedia = (
   mime: string,
   name: string | undefined,
   capabilities: Model.Capabilities,
@@ -213,6 +225,17 @@ export const unsupportedParts = (
   provider?: string,
 ) => replaceMedia(messages, (media) => unsupportedMedia(media.mime, media.name, capabilities, provider))
 
+export const imageCut = (sizes: readonly number[]) => {
+  let cut = 0
+  let kept = 0
+  for (const size of sizes) {
+    kept += size
+    if (kept <= IMAGE_BYTES_TRIGGER) continue
+    while (kept > IMAGE_BYTES_TARGET) kept -= sizes[cut++]!
+  }
+  return cut
+}
+
 export const boundImages = (messages: LLMRequest["messages"]) => {
   const isImage = (mime: string) => mime.toLowerCase().startsWith("image/")
   const sizes = messages.flatMap((message) =>
@@ -227,13 +250,7 @@ export const boundImages = (messages: LLMRequest["messages"]) => {
   // Replay the images in order, dropping the oldest down to the target whenever the kept payload passes the trigger.
   // A new image then moves the cut only every (trigger - target) bytes instead of on every request, so the replaced
   // prefix, and with it the provider's prompt cache, stays the same between cuts.
-  let cut = 0
-  let kept = 0
-  for (const size of sizes) {
-    kept += size
-    if (kept <= IMAGE_BYTES_TRIGGER) continue
-    while (kept > IMAGE_BYTES_TARGET) kept -= sizes[cut++]!
-  }
+  const cut = imageCut(sizes)
   if (cut === 0) return messages
 
   let index = 0
@@ -442,7 +459,50 @@ export const layer = Layer.effect(
         hooks.trigger("session", name, { ...draft, agent, tools })
 
     return Service.of({
-      primary: (input) => prepare("primary", input, agentHook("context", input.agent)),
+      primary: Effect.fnUntraced(function* (input: Input) {
+        if (!input.planned) return yield* prepare("primary", input, agentHook("context", input.agent))
+        // An injected legacy hook service gets the compatible full transcript. The real service captures
+        // has and invocation from the same callback array, even if registration changes during DB I/O.
+        const snapshot = hooks.contextSnapshot
+          ? yield* hooks.contextSnapshot(input.model.ref.providerID)
+          : {
+              has: true,
+              trigger: (event: PluginHooks.Domains["session"]["context"]) => hooks.trigger("session", "context", event),
+            }
+        if ("planned" in snapshot && snapshot.planned) {
+          const trigger = snapshot.planned
+          const planned = input.planned
+          return yield* prepare("primary", input, (draft, tools) =>
+            Effect.gen(function* () {
+              const shaped = yield* trigger({ ...draft, agent: input.agent, tools, messages: [...planned.messages] })
+              const messages = yield* ModelMedia.materialize(
+                ModelMedia.select(
+                  shaped.messages,
+                  planned.resolver,
+                  input.model.capabilities,
+                  input.model.model.provider,
+                ),
+                planned.resolver,
+              )
+              return { ...shaped, messages }
+            }),
+          )
+        }
+        const messages = yield* ModelMedia.materialize(
+          snapshot.has
+            ? input.planned.messages
+            : ModelMedia.select(
+                input.planned.messages,
+                input.planned.resolver,
+                input.model.capabilities,
+                input.model.model.provider,
+              ),
+          input.planned.resolver,
+        )
+        return yield* prepare("primary", { ...input, messages }, (draft, tools) =>
+          snapshot.trigger({ ...draft, agent: input.agent, tools }),
+        )
+      }),
       compaction: (input) => prepare("compaction", input, agentHook("compaction", input.agent)),
       generate: (input) => prepare("generate", input, agentHook("generate", input.agent)),
       title: (input) => prepare("title", input, (draft) => hooks.trigger("session", "title", draft)),

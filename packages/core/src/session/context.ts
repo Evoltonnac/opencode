@@ -1,3 +1,5 @@
+import type { SessionStored } from "./stored.js"
+import type { Resolver } from "./model-media.js"
 export * as SessionContext from "./context.js"
 
 import { Model } from "../model.js"
@@ -20,7 +22,6 @@ import { Tool } from "../tool.js"
 import { AgentNotFoundError } from "./error.js"
 import { SessionHistory } from "./history.js"
 import { InstructionEntry } from "./instruction-entry.js"
-import { SessionMessage } from "./message.js"
 import { SessionModelRequest } from "./model-request.js"
 import { SessionRunnerModel } from "./runner/model.js"
 import { SessionSchema } from "./schema.js"
@@ -38,7 +39,8 @@ export interface Loaded {
   readonly agent: Agent.Selection & { readonly info: Agent.Info }
   readonly model: SessionRunnerModel.Resolved
   readonly initial: ReadonlyArray<Instructions.Rendered>
-  readonly messages: ReadonlyArray<SessionMessage.Info>
+  readonly messages: ReadonlyArray<SessionStored.Message>
+  readonly media?: Resolver
   readonly tools: Tool.Snapshot
 }
 
@@ -189,6 +191,7 @@ const layer = Layer.effect(
         model,
         initial: history.initial,
         messages: history.entries.map((entry) => entry.message),
+        media: { meta: history.media.meta, load: history.media.load },
         tools: selection.tools,
       }
     })

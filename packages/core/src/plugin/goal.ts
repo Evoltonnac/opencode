@@ -1,3 +1,4 @@
+import { PluginHooks } from "./hooks.js"
 export * as GoalPlugin from "./goal.js"
 
 import { isContextOverflowFailure, Message } from "@opencode/ai/effect"
@@ -217,16 +218,19 @@ export const Plugin = define({
 
     // Until the next continuation restates the objective, a compacted history may not show it. Add it near the tail,
     // without persisting it, so the cached prefix stays warm and the reminder stops once a continuation lands.
-    yield* ctx.session.hook("context", (event) =>
-      read(event.sessionID).pipe(
-        Effect.map((goal) => {
-          if (goal?.status !== "active") return
-          const objective = objectiveBlock(goal.objective)
-          if (event.messages.some((message) => message.role === "user" && textOf(message).includes(objective))) return
-          const at = event.messages.at(-1)?.role === "user" ? event.messages.length - 1 : event.messages.length
-          event.messages.splice(at, 0, Message.user(render(REMINDER, { objective: escape(goal.objective) })))
-        }),
-        Effect.catchCause((cause) => Effect.logWarning("failed to remind the model of the goal", { cause })),
+    yield* ctx.session.hook(
+      "context",
+      PluginHooks.plannedContext((event) =>
+        read(event.sessionID).pipe(
+          Effect.map((goal) => {
+            if (goal?.status !== "active") return
+            const objective = objectiveBlock(goal.objective)
+            if (event.messages.some((message) => message.role === "user" && textOf(message).includes(objective))) return
+            const at = event.messages.at(-1)?.role === "user" ? event.messages.length - 1 : event.messages.length
+            event.messages.splice(at, 0, Message.user(render(REMINDER, { objective: escape(goal.objective) })))
+          }),
+          Effect.catchCause((cause) => Effect.logWarning("failed to remind the model of the goal", { cause })),
+        ),
       ),
     )
 
@@ -448,7 +452,7 @@ function objectiveBlock(objective: string) {
   return `<untrusted_objective>\n${escape(objective)}\n</untrusted_objective>`
 }
 
-function textOf(message: Message) {
+function textOf(message: PluginHooks.PlannedContext["messages"][number]) {
   return message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")
 }
 

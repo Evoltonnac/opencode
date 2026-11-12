@@ -1,3 +1,4 @@
+import { PluginHooks } from "../../hooks.js"
 export * as ClaudeSessionHooks from "./session.js"
 
 import { AssistantMessage, ToolMessage, type ToolResultPart } from "@opencode/ai/effect"
@@ -33,20 +34,30 @@ export const register = Effect.fn("ClaudeSessionHooks.register")(function* (ctx:
   )
   yield* ctx.session.hook(
     "context",
-    (event) =>
+    PluginHooks.plannedContext((event) =>
       Effect.sync(() => {
         // Let Claude choose its normal output budget. Later hooks can still set an explicit maxTokens.
         // Compaction has its own hook, so it keeps OpenCode's summary budget.
         delete event.options.maxTokens
         // Preserve tool error status before the AI SDK bridge flattens error results to plain text.
+        // Planned local attachments occur only in user messages, which stay untouched below.
         event.messages = event.messages.map((message) => {
           if (message.role === "tool")
-            return new ToolMessage({ ...message, content: message.content.map(flagToolError) })
+            return new ToolMessage({
+              ...message,
+              role: "tool",
+              content: (message.content as ToolMessage["content"]).map(flagToolError),
+            })
           if (message.role !== "assistant") return message
           const content = message.content.map((part) => (part.type === "tool-result" ? flagToolError(part) : part))
-          return new AssistantMessage({ ...message, content })
+          return new AssistantMessage({
+            ...message,
+            role: "assistant",
+            content: content as AssistantMessage["content"],
+          })
         })
       }),
+    ),
     { providerID: ClaudeProvider.ID },
   )
   // Claude Code already retries API failures. Replaying the whole turn here also retries permanent billing errors.

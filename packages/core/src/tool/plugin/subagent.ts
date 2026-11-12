@@ -1,8 +1,8 @@
+import { PluginHooks } from "../../plugin/hooks.js"
 export * as SubagentTool from "./subagent.js"
 
 import { ToolFailure } from "@opencode/ai/effect"
 import type { Context } from "@opencode/plugin/effect/plugin"
-import type { SessionHooks } from "@opencode/plugin/effect/session"
 import { Effect, Predicate, Schema } from "effect"
 import { Agent } from "../../agent.js"
 import { Config } from "../../config.js"
@@ -279,7 +279,7 @@ export const Plugin = {
       }),
     )
 
-    const hook = (event: SessionHooks["context"]) =>
+    const hook = (event: PluginHooks.PlannedContext) =>
       Effect.gen(function* () {
         const tool = event.tools[name]
         if (!tool) return
@@ -304,7 +304,7 @@ export const Plugin = {
           ),
         ].join("\n")
       })
-    yield* ctx.session.hook("context", hook)
+    yield* ctx.session.hook("context", PluginHooks.plannedContext(hook))
     yield* ctx.session.hook("compaction", hook)
     yield* ctx.session.hook("generate", hook)
   }),

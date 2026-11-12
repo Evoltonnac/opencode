@@ -58,7 +58,7 @@ const unavailableToolItem = (item: Tool.Content & { readonly type: "file" }): To
   text: unavailable(item.mime, item.name),
 })
 
-function inlineFile(file: SessionStored.File, blobs: Blobs): SessionStored.File {
+export function inlineFile(file: SessionStored.File, blobs: Blobs): SessionStored.File {
   if (!isFileRef(file)) return file
   const data = blobs.get(SessionStored.refHash(file.uri))
   if (data === undefined) return unavailableFile(file)
@@ -66,7 +66,7 @@ function inlineFile(file: SessionStored.File, blobs: Blobs): SessionStored.File 
   return { ...rest, data }
 }
 
-function inlineToolItem(item: Tool.Content, blobs: Blobs): Tool.Content {
+export function inlineToolItem(item: Tool.Content, blobs: Blobs): Tool.Content {
   if (!isToolFileRef(item)) return item
   const data = blobs.get(SessionStored.refHash(item.uri))
   if (data === undefined) return unavailableToolItem(item)
@@ -119,6 +119,110 @@ const load = Effect.fnUntraced(function* (db: DatabaseService, hashes: ReadonlyS
 
 const view = (data: Uint8Array) =>
   Buffer.isBuffer(data) ? data : Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+
+/** Private runner preparation: image payloads remain stored refs until selection finishes.
+ * Call only with rows from the already-authorized Session history query, never hook-supplied rows.
+ * Unlike the client media route, legacy blobs need not have a blob_ref record.
+ */
+export const modelRows = Effect.fnUntraced(function* (db: DatabaseService, rows: ReadonlyArray<MessageRow>) {
+  const allowed = new Set<string>()
+  const images = new Set<string>()
+  const immediate = new Set<string>()
+  for (const row of rows) {
+    collect(row.data, allowed)
+    if ("content" in row.data)
+      for (const part of row.data.content)
+        if (part.type === "tool" && part.state.status === "error")
+          for (const item of part.state.content ?? [])
+            if (isToolFileRef(item)) immediate.add(SessionStored.refHash(item.uri))
+    rewriteMessage(
+      row,
+      (file) => {
+        if (isFileRef(file))
+          (file.mime.toLowerCase().startsWith("image/") ? images : immediate).add(SessionStored.refHash(file.uri))
+        return file
+      },
+      (item) => {
+        if (isToolFileRef(item))
+          (item.mime.toLowerCase().startsWith("image/") ? images : immediate).add(SessionStored.refHash(item.uri))
+        return item
+      },
+    )
+  }
+  const meta = new Map<string, Meta>()
+  for (const batch of DatabaseBatch.batches([...images], 1)) {
+    const found = yield* db
+      .select({ hash: BlobTable.hash, bytes: BlobTable.bytes, width: BlobTable.width, height: BlobTable.height })
+      .from(BlobTable)
+      .where(inArray(BlobTable.hash, batch))
+      .all()
+      .pipe(Effect.orDie)
+    for (const { hash, ...size } of found) meta.set(hash, size)
+  }
+  const blobs = yield* load(db, immediate)
+  const prepared = rows.map((row) =>
+    rewriteMessage(
+      row,
+      (file) =>
+        isFileRef(file) && file.mime.toLowerCase().startsWith("image/")
+          ? meta.has(SessionStored.refHash(file.uri))
+            ? file
+            : unavailableFile(file)
+          : inlineFile(file, blobs),
+      (item) =>
+        isToolFileRef(item) && item.mime.toLowerCase().startsWith("image/")
+          ? meta.has(SessionStored.refHash(item.uri))
+            ? item
+            : unavailableToolItem(item)
+          : inlineToolItem(item, blobs),
+    ),
+  )
+  return {
+    rows: prepared.map((row) =>
+      "content" in row.data
+        ? {
+            ...row,
+            data: {
+              ...row.data,
+              content: row.data.content.map(
+                (part): Part =>
+                  part.type === "tool" && part.state.status === "error" && part.state.content
+                    ? {
+                        ...part,
+                        state: {
+                          ...part.state,
+                          content: map(part.state.content, (item) => inlineToolItem(item, blobs)),
+                        },
+                      }
+                    : part,
+              ),
+            },
+          }
+        : row,
+    ),
+    meta: meta as ReadonlyMap<string, Meta>,
+    load: Effect.fnUntraced(function* (hashes: ReadonlySet<string>) {
+      if ([...hashes].some((hash) => !allowed.has(hash)))
+        return yield* Effect.die(new Error("Model media reference was not present in the authorized history"))
+      return yield* load(db, hashes)
+    }),
+    resolve: Effect.fnUntraced(function* (selected: ReadonlyArray<MessageRow>) {
+      const hashes = new Set<string>()
+      for (const row of selected) collect(row.data, hashes)
+      // Validate the whole set before any payload query. Knowing a hash does not authorize reading it.
+      if ([...hashes].some((hash) => !allowed.has(hash)))
+        return yield* Effect.die(new Error("Model media reference was not present in the authorized history"))
+      const selectedBlobs = yield* load(db, hashes)
+      return selected.map((row) =>
+        rewriteMessage(
+          row,
+          (file) => inlineFile(file, selectedBlobs),
+          (item) => inlineToolItem(item, selectedBlobs),
+        ),
+      )
+    }),
+  }
+})
 
 /** Restores inline media for the refs in `session_message` rows. Rows without refs are returned untouched. */
 export const hydrate = Effect.fnUntraced(function* (db: DatabaseService, rows: ReadonlyArray<MessageRow>) {

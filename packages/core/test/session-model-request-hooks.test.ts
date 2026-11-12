@@ -1,5 +1,7 @@
+import type { PlannedMessage, Resolver } from "../src/session/model-media"
+import { SessionStored } from "../src/session/stored"
 import { describe, expect } from "bun:test"
-import { ToolDefinition } from "@opencode/ai/effect"
+import { Message, ToolDefinition } from "@opencode/ai/effect"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { Agent } from "@opencode/schema/agent"
 import { Money } from "@opencode/schema/money"
@@ -12,7 +14,7 @@ import { AbsolutePath } from "@opencode/core/schema"
 import { SessionModelRequest } from "@opencode/core/session/model-request"
 import { SessionModelTransport } from "@opencode/core/session/model-transport"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
-import { DateTime, Effect, Stream } from "effect"
+import { DateTime, Deferred, Effect, Fiber, Stream } from "effect"
 import { HttpClientRequest, HttpClientResponse } from "effect/http"
 import { testEffect } from "./lib/effect"
 import { PluginTestLayer } from "./plugin/fixture"
@@ -146,14 +148,12 @@ describe("SessionModelRequest HTTP hooks", () => {
       }
 
       const required = yield* Effect.forEach([1, 2], () =>
-        requests
-          .primary({ session, agent: Agent.ID.make("build"), model, system: [], messages: [], tools })
-          .pipe(
-            Effect.map((prepared) => {
-              const tool = prepared.request.tools[0]
-              return tool?.type === "tool" ? tool.inputSchema.required : undefined
-            }),
-          ),
+        requests.primary({ session, agent: Agent.ID.make("build"), model, system: [], messages: [], tools }).pipe(
+          Effect.map((prepared) => {
+            const tool = prepared.request.tools[0]
+            return tool?.type === "tool" ? tool.inputSchema.required : undefined
+          }),
+        ),
       )
 
       expect(required).toEqual([
@@ -235,6 +235,276 @@ describe("SessionModelRequest HTTP hooks", () => {
         "send:primary:create",
         "receive:primary:created",
       ])
+    }),
+  )
+})
+
+describe("primary stored-media boundary", () => {
+  const hash = "a".repeat(64)
+  const planned: PlannedMessage[] = [
+    {
+      role: "user",
+      content: [
+        {
+          type: "local-media",
+          file: {
+            mime: "image/png",
+            uri: SessionStored.ref(hash),
+            source: { type: "inline" },
+            name: "a.png",
+          },
+        },
+      ],
+    },
+  ]
+  const metadata = new Map([[hash, { bytes: 3, width: null, height: null }]])
+  const input = (resolver: Resolver) => ({
+    session,
+    agent: Agent.ID.make("build"),
+    model,
+    system: [],
+    messages: [],
+    planned: { messages: planned, resolver },
+  })
+  const service = SessionModelRequest.Service.pipe(
+    Effect.provide(SessionModelRequest.layer),
+    Effect.provideService(SessionModelTransport.Service, transport),
+  )
+
+  it.effect("no context callback selects unsupported images before any payload load", () =>
+    Effect.gen(function* () {
+      const requests = yield* service
+      const reads: string[] = []
+      const result = yield* requests.primary(
+        input({
+          meta: metadata,
+          load: (hashes) =>
+            Effect.sync(() => {
+              reads.push(...hashes)
+              return new Map([[hash, "AQID"]])
+            }),
+        }),
+      )
+      expect(reads).toEqual([])
+      expect(JSON.stringify(result.request.messages)).toContain("does not support image")
+      expect(JSON.stringify(result.event.messages)).not.toContain("local-media")
+      expect(JSON.stringify(result.request.messages)).not.toContain("media:" + hash)
+    }),
+  )
+
+  it.effect("audited core callbacks run in order on typed refs before selection without loading images", () =>
+    Effect.gen(function* () {
+      const hooks = yield* PluginHooks.Service
+      const seen: string[] = []
+      yield* hooks.register(
+        "session",
+        "context",
+        PluginHooks.plannedContext((event) =>
+          Effect.sync(() => {
+            seen.push(event.messages[0].content[0].type)
+            event.messages.push(Message.user("core reminder"))
+          }),
+        ),
+      )
+      yield* hooks.register(
+        "session",
+        "context",
+        PluginHooks.plannedContext((event) =>
+          Effect.sync(() => {
+            expect(event.messages.at(-1)?.content[0]).toEqual(Message.text("core reminder"))
+            seen.push("second")
+          }),
+        ),
+      )
+      const requests = yield* service
+      const reads: string[] = []
+      const result = yield* requests.primary(
+        input({
+          meta: metadata,
+          load: (hashes) =>
+            Effect.sync(() => {
+              reads.push(...hashes)
+              return new Map([[hash, "AQID"]])
+            }),
+        }),
+      )
+      expect(seen).toEqual(["local-media", "second"])
+      expect(reads).toEqual([])
+      expect(JSON.stringify(result.request.messages)).toContain("core reminder")
+      expect(JSON.stringify(result.request.messages)).not.toContain("local-media")
+    }),
+  )
+
+  it.effect("one unknown callback makes the whole snapshot canonical, including audited callbacks", () =>
+    Effect.gen(function* () {
+      const hooks = yield* PluginHooks.Service
+      const seen: string[] = []
+      yield* hooks.register(
+        "session",
+        "context",
+        PluginHooks.plannedContext((event) =>
+          Effect.sync(() => {
+            seen.push(event.messages[0].content[0].type)
+          }),
+        ),
+      )
+      yield* hooks.register("session", "context", (event) =>
+        Effect.sync(() => {
+          seen.push(event.messages[0].content[0].type)
+          expect(JSON.stringify(event.messages)).toContain("AQID")
+        }),
+      )
+      const requests = yield* service
+      const reads: string[] = []
+      yield* requests.primary(
+        input({
+          meta: metadata,
+          load: (hashes) =>
+            Effect.sync(() => {
+              reads.push(...hashes)
+              return new Map([[hash, "AQID"]])
+            }),
+        }),
+      )
+      expect(seen).toEqual(["media", "media"])
+      expect(reads).toEqual([hash])
+    }),
+  )
+
+  it.effect("context hooks see canonical unbounded input and their edited messages remain authoritative", () =>
+    Effect.gen(function* () {
+      const hooks = yield* PluginHooks.Service
+      let called = 0
+      yield* hooks.register("session", "context", (event) =>
+        Effect.sync(() => {
+          called++
+          expect(JSON.stringify(event.messages)).toContain("AQID")
+          expect(JSON.stringify(event.messages)).not.toContain("local-media")
+          expect(JSON.stringify(event.messages)).not.toContain("media:" + hash)
+          event.messages = [Message.user("rewritten")]
+        }),
+      )
+      const requests = yield* service
+      const reads: string[] = []
+      const result = yield* requests.primary(
+        input({
+          meta: metadata,
+          load: (hashes) =>
+            Effect.sync(() => {
+              reads.push(...hashes)
+              return new Map([[hash, "AQID"]])
+            }),
+        }),
+      )
+      expect(reads).toEqual([hash])
+      expect(called).toBe(1)
+      expect(result.request.messages).toEqual([Message.user("rewritten")])
+    }),
+  )
+
+  it.effect("snapshot ignores callbacks registered during loading and retains captured callbacks after disposal", () =>
+    Effect.gen(function* () {
+      const hooks = yield* PluginHooks.Service
+      const requests = yield* service
+      let late = 0
+      yield* requests.primary(
+        input({
+          meta: metadata,
+          load: () =>
+            Effect.gen(function* () {
+              yield* hooks.register("session", "context", () =>
+                Effect.sync(() => {
+                  late++
+                }),
+              )
+              return new Map([[hash, "AQID"]])
+            }).pipe(Effect.scoped),
+        }),
+      )
+      expect(late).toBe(0)
+      let captured = 0
+      const registration = yield* hooks.register("session", "context", () =>
+        Effect.sync(() => {
+          captured++
+        }),
+      )
+      yield* requests.primary(
+        input({ meta: metadata, load: () => registration.dispose.pipe(Effect.as(new Map([[hash, "AQID"]]))) }),
+      )
+      expect(captured).toBe(1)
+    }),
+  )
+
+  it.effect("snapshot follows provider edits between callbacks just like the original trigger", () =>
+    Effect.gen(function* () {
+      const hooks = yield* PluginHooks.Service
+      const seen: string[] = []
+      yield* hooks.register(
+        "session",
+        "context",
+        (event) =>
+          Effect.sync(() => {
+            seen.push("switch")
+            Object.assign(event, { model: { ...event.model, providerID: "changed" } })
+          }),
+        { providerID: model.ref.providerID },
+      )
+      yield* hooks.register(
+        "session",
+        "context",
+        () =>
+          Effect.sync(() => {
+            seen.push("old")
+          }),
+        { providerID: model.ref.providerID },
+      )
+      yield* hooks.register(
+        "session",
+        "context",
+        () =>
+          Effect.sync(() => {
+            seen.push("new")
+          }),
+        { providerID: "changed" as typeof model.ref.providerID },
+      )
+      const requests = yield* service
+      yield* requests.primary(input({ meta: metadata, load: () => Effect.succeed(new Map([[hash, "AQID"]])) }))
+      expect(seen).toEqual(["switch", "new"])
+    }),
+  )
+
+  it.effect("cancelling selected media loading interrupts preparation before any hook or request escapes", () =>
+    Effect.gen(function* () {
+      const hooks = yield* PluginHooks.Service
+      let called = false
+      yield* hooks.register("session", "context", () =>
+        Effect.sync(() => {
+          called = true
+        }),
+      )
+      const requests = yield* service
+      const started = yield* Deferred.make<void>()
+      let interrupted = false
+      const fiber = yield* requests
+        .primary(
+          input({
+            meta: metadata,
+            load: () =>
+              Deferred.succeed(started, undefined).pipe(
+                Effect.andThen(Effect.never),
+                Effect.onInterrupt(() =>
+                  Effect.sync(() => {
+                    interrupted = true
+                  }),
+                ),
+              ),
+          }),
+        )
+        .pipe(Effect.forkChild)
+      yield* Deferred.await(started)
+      yield* Fiber.interrupt(fiber)
+      expect(interrupted).toBe(true)
+      expect(called).toBe(false)
     }),
   )
 })

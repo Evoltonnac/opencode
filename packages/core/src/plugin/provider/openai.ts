@@ -1,3 +1,4 @@
+import { PluginHooks } from "../hooks.js"
 import type { IntegrationOAuthMethodRegistration } from "@opencode/plugin/effect/integration"
 import { define } from "@opencode/plugin/effect/plugin"
 import type { SessionRequest } from "@opencode/plugin/effect/session"
@@ -322,12 +323,12 @@ export const OpenAIPlugin = define({
       { providerID: Provider.ID.openai },
     )
     // The ChatGPT backend rejects a requested output limit, and OpenAI counts one against rate limits.
-    const omitOutputLimit = (evt: SessionRequest) =>
+    const omitOutputLimit = (evt: Pick<SessionRequest, "options">) =>
       Effect.sync(() => {
         delete evt.options.maxTokens
       })
     for (const name of ["context", "compaction"] as const)
-      yield* ctx.session.hook(name, omitOutputLimit, { providerID: Provider.ID.openai })
+      yield* ctx.session.hook(name, PluginHooks.plannedContext(omitOutputLimit), { providerID: Provider.ID.openai })
     yield* ProviderRefresh.onSwitch(
       "openai",
       loading.withPermit(ProviderRefresh.reloadIfChanged(load(), ctx.provider.reload())),

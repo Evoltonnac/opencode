@@ -1,8 +1,8 @@
+import { PluginHooks } from "../../plugin/hooks.js"
 export * as ShellTool from "./shell.js"
 
 import { ToolFailure } from "@opencode/ai/effect"
 import type { Context } from "@opencode/plugin/effect/plugin"
-import type { SessionHooks } from "@opencode/plugin/effect/session"
 import type { ShellCreateBefore } from "@opencode/plugin/effect/shell"
 import type { Tool } from "@opencode/schema/tool"
 import { Deferred, Effect, Schema, Scope } from "effect"
@@ -267,13 +267,13 @@ export const Plugin = {
       )
       .pipe(Effect.orDie)
 
-    const hook = (event: SessionHooks["context"]) =>
+    const hook = (event: PluginHooks.PlannedContext) =>
       Effect.gen(function* () {
         const tool = event.tools[name]
         if (!tool) return
         tool.description = description(ShellSelect.name(yield* compatibleShell))
       })
-    yield* ctx.session.hook("context", hook)
+    yield* ctx.session.hook("context", PluginHooks.plannedContext(hook))
     yield* ctx.session.hook("compaction", hook)
     yield* ctx.session.hook("generate", hook)
   }),

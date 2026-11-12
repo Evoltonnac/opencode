@@ -1,3 +1,5 @@
+import * as ModelMedia from "../../../../src/session/model-media"
+import { SessionStored } from "../../../../src/session/stored"
 import { Message, SystemPart } from "@opencode/ai/effect"
 import type { LanguageModelV3 } from "@ai-sdk/provider"
 import type { AccountInfo } from "@anthropic-ai/claude-agent-sdk"
@@ -389,6 +391,52 @@ describe("ClaudeAgentPlugin session hooks", () => {
       // Compaction keeps OpenCode's summary budget.
       const compaction = yield* hooks.trigger("session", "compaction", hookEvent(session.id))
       expect(compaction.options.maxTokens).toBe(32_000)
+    }),
+  )
+
+  it.live("planned user and tool image refs preserve Claude options and error metadata exactly", () =>
+    Effect.gen(function* () {
+      yield* addPlugin(FakeIO.make({ claude: FakeClaude.make([]) }))
+      yield* addAgents
+      const hooks = yield* PluginHooks.Service
+      const session = yield* newSession
+      const hash = "a".repeat(64)
+      const messages: ModelMedia.PlannedMessage[] = [
+        {
+          role: "user",
+          content: [
+            {
+              type: "local-media",
+              file: { uri: SessionStored.ref(hash), mime: "image/png", source: { type: "inline" } },
+            },
+          ],
+        },
+        Message.tool({
+          id: "image",
+          name: "read",
+          result: [{ type: "file", uri: SessionStored.ref(hash), mime: "image/png" }],
+          resultType: "content",
+        }),
+        Message.tool({ id: "abort", name: "bash", result: { error: { type: "aborted" } }, resultType: "error" }),
+        Message.tool({ id: "error", name: "bash", result: "exit 1", resultType: "error" }),
+      ]
+      const resolver: ModelMedia.Resolver = {
+        meta: new Map([[hash, { bytes: 3, width: null, height: null }]]),
+        load: () => Effect.succeed(new Map([[hash, "AQID"]])),
+      }
+      const full = yield* ModelMedia.materialize(messages, resolver)
+      const expected = yield* hooks.trigger("session", "context", { ...hookEvent(session.id), messages: full })
+      const snapshot = yield* hooks.contextSnapshot!(ClaudeProvider.ID)
+      if (!snapshot.planned) throw new Error("Claude callbacks must support planned context")
+      const planned = yield* snapshot.planned({ ...hookEvent(session.id), messages })
+      expect(planned.messages[0].content[0].type).toBe("local-media")
+      const actual = yield* ModelMedia.materialize(planned.messages, resolver)
+      expect(actual).toEqual(expected.messages)
+      expect(planned.options).toEqual(expected.options)
+      expect(planned.system).toEqual(expected.system)
+      expect(planned.tools).toEqual(expected.tools)
+      expect(JSON.stringify(actual)).toContain('"toolAborted":true')
+      expect(JSON.stringify(actual)).not.toContain("media:" + hash)
     }),
   )
 

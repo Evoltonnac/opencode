@@ -1,7 +1,7 @@
+import { PluginHooks } from "./hooks.js"
 export * as OptimizePlugin from "./optimize.js"
 
 import { define, type Context } from "@opencode/plugin/effect/plugin"
-import type { SessionHooks } from "@opencode/plugin/effect/session"
 import { Model } from "@opencode/schema/model"
 import { Effect } from "effect"
 import { SessionSystemPrompt } from "../session/system-prompt.js"
@@ -61,9 +61,9 @@ export const MetaPlugin = make("opencode.prompt.meta", (model) => {
 
 export const Plugins = [OpenAIPlugin, AnthropicPlugin, KimiPlugin, ArceePlugin, MetaPlugin] as const
 
-const models = new WeakMap<SessionHooks["context"], Model.Info>()
+const models = new WeakMap<PluginHooks.PlannedContext, Model.Info>()
 
-export const resolveModel = (ctx: Context, event: SessionHooks["context"]) =>
+export const resolveModel = (ctx: Context, event: PluginHooks.PlannedContext) =>
   Effect.gen(function* () {
     const cached = models.get(event)
     if (cached?.providerID === event.model.providerID && cached.id === event.model.id) return cached
@@ -77,13 +77,13 @@ export const resolveModel = (ctx: Context, event: SessionHooks["context"]) =>
 
 function make(
   id: string,
-  optimize: (model: Model.Info, tools: SessionHooks["context"]["tools"]) => string | undefined,
+  optimize: (model: Model.Info, tools: PluginHooks.PlannedContext["tools"]) => string | undefined,
   mode: "override" | "append" = "override",
 ) {
   return define({
     id,
     effect: Effect.fn(`OptimizePlugin.${id}`)(function* (ctx) {
-      const hook = (event: SessionHooks["context"]) =>
+      const hook = (event: PluginHooks.PlannedContext) =>
         Effect.gen(function* () {
           const model = yield* resolveModel(ctx, event)
           // Curate tools before rendering their guidance, including for agents with a custom system prompt.
@@ -96,7 +96,7 @@ function make(
           const text = mode === "append" ? `${system.text}\n\n${rendered}` : rendered
           event.system[0] = { ...system, text }
         }).pipe(Effect.catch(() => Effect.void))
-      yield* ctx.session.hook("context", hook)
+      yield* ctx.session.hook("context", PluginHooks.plannedContext(hook))
       yield* ctx.session.hook("compaction", hook)
       yield* ctx.session.hook("generate", hook)
     }),

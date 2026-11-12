@@ -1,8 +1,8 @@
+import { PluginHooks } from "../../plugin/hooks.js"
 export * as OpenCodeTools from "./opencode.js"
 
 import { SystemPart, ToolFailure } from "@opencode/ai/effect"
 import type { Context } from "@opencode/plugin/effect/plugin"
-import type { SessionHooks } from "@opencode/plugin/effect/session"
 import { Model } from "@opencode/schema/model"
 import { AbsolutePath } from "@opencode/schema/schema"
 import { Session } from "@opencode/schema/session"
@@ -98,7 +98,7 @@ export const Plugin = {
   effect: Effect.fn("OpenCodeTools.Plugin")(function* (ctx: Context) {
     const access = yield* FileAccess.Service
     const permission = yield* Permission.Service
-    const hook = (event: SessionHooks["context"]) =>
+    const hook = (event: PluginHooks.PlannedContext) =>
       Effect.sync(() => {
         event.system.push(
           SystemPart.make(
@@ -106,7 +106,7 @@ export const Plugin = {
           ),
         )
       })
-    yield* ctx.session.hook("context", hook)
+    yield* ctx.session.hook("context", PluginHooks.plannedContext(hook))
     yield* ctx.session.hook("compaction", hook)
     yield* ctx.session.hook("generate", hook)
     yield* ctx.tool
@@ -227,9 +227,7 @@ export const Plugin = {
                 output: { directory: target.absolute, removed: true },
                 content: `Removed worktree ${target.absolute}.`,
               }
-            }).pipe(
-              Effect.mapError(toolFailure(`Unable to remove worktree ${input.directory}`)),
-            ),
+            }).pipe(Effect.mapError(toolFailure(`Unable to remove worktree ${input.directory}`))),
         })
         draft.add({
           name: "models",
