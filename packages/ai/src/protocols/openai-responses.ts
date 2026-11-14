@@ -345,6 +345,7 @@ export const transport = channelTransport({
   id: ADAPTER,
   name: NAME,
   rotateAfterMs: WEBSOCKET_ROTATE_AFTER_MS,
+  deferHttpBody: true,
   headers: (headers) => Headers.set(headers, "openai-beta", headers["openai-beta"] ?? WEBSOCKET_PROTOCOL_HEADER),
 })
 

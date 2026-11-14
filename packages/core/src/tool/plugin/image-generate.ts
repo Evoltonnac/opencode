@@ -338,9 +338,9 @@ export const Plugin = {
                 title: input.prompt,
                 metadata: { sessionID: context.sessionID, path: stem, model: ref },
                 recovery: { kind: "image", sessionID: context.sessionID, path: stem, model: ref },
+                background: true,
                 run,
               })
-              yield* jobs.background(id)
               yield* notifyWhenDone({ sessionID: context.sessionID, id, notificationID, file: stem })
               return {
                 output: { id, path: stem, model: ref },
@@ -352,9 +352,7 @@ export const Plugin = {
                 ].join("\n"),
                 metadata: { path: stem, model: ref, jobID: id },
               }
-            }).pipe(
-              Effect.mapError(toolFailure("Unable to generate image")),
-            ),
+            }).pipe(Effect.mapError(toolFailure("Unable to generate image"))),
         })
       })
       .pipe(Effect.orDie)

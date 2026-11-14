@@ -27,6 +27,7 @@ export type Part = ContentPart | LocalMedia
 export interface PlannedMessage {
   readonly id?: string
   readonly role: Message["role"]
+  readonly metadata?: Record<string, unknown>
   readonly content: ReadonlyArray<Part>
 }
 export interface Resolver {
@@ -51,7 +52,9 @@ export const plan = (
   provider: string,
 ): PlannedMessage[] =>
   messages.flatMap((message): PlannedMessage[] => {
-    if (message.type !== "user") return toLLMMessages([message], model, provider)
+    const withMetadata = (item: PlannedMessage): PlannedMessage =>
+      message.metadata === undefined || item.id !== message.id ? item : { ...item, metadata: message.metadata }
+    if (message.type !== "user") return toLLMMessages([message], model, provider).map(withMetadata)
     const files = message.files ?? []
     const deduplicate =
       files.filter((file) => imageMimes.has(file.mime) && file.source.type === "inline" && file.mention?.text).length >
@@ -81,7 +84,7 @@ export const plan = (
       if (location) content.push(location)
       content.push({ type: "local-media", file, location })
     }
-    return content.length === 0 ? [] : [{ id: message.id, role: "user", content }]
+    return content.length === 0 ? [] : [withMetadata({ id: message.id, role: "user", content })]
   })
 
 const mediaSize = (part: MediaPart) =>
@@ -162,7 +165,7 @@ export const materialize = Effect.fnUntraced(function* (messages: readonly Plann
           if (item.type === "file" && isToolRef(item)) hashes.add(SessionStored.refHash(item.uri))
     }
   const blobs = yield* resolver.load(hashes)
-  return messages.map((message) => {
+  return messages.map((message): Message & { readonly metadata?: Record<string, unknown> } => {
     // A deleted selected blob becomes the old text attachment, which has no standalone location prefix.
     const missingLocations = new Set(
       message.content.flatMap((part) =>
@@ -188,16 +191,24 @@ export const materialize = Effect.fnUntraced(function* (messages: readonly Plann
       ]
     })
     // Every role comes from canonical lowering; only user media and tool file values are replaced.
-    switch (message.role) {
-      case "user":
-        return new UserMessage({ ...message, role: "user", content: content as UserMessage["content"] })
-      case "assistant":
-        return new AssistantMessage({ ...message, role: "assistant", content: content as AssistantMessage["content"] })
-      case "tool":
-        return new ToolMessage({ ...message, role: "tool", content: content as ToolMessage["content"] })
-      case "system":
-        return new SystemMessage({ ...message, role: "system", content: content as SystemMessage["content"] })
-    }
+    const { metadata, ...envelope } = message
+    const canonical = (() => {
+      switch (message.role) {
+        case "user":
+          return new UserMessage({ ...envelope, role: "user", content: content as UserMessage["content"] })
+        case "assistant":
+          return new AssistantMessage({
+            ...envelope,
+            role: "assistant",
+            content: content as AssistantMessage["content"],
+          })
+        case "tool":
+          return new ToolMessage({ ...envelope, role: "tool", content: content as ToolMessage["content"] })
+        case "system":
+          return new SystemMessage({ ...envelope, role: "system", content: content as SystemMessage["content"] })
+      }
+    })()
+    return metadata === undefined ? canonical : { ...canonical, metadata }
   })
 })
 

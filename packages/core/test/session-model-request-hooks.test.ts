@@ -43,6 +43,42 @@ const transport = SessionModelTransport.Service.of({
 })
 
 describe("SessionModelRequest HTTP hooks", () => {
+  it.effect(
+    "advertises only supported freeform formats without removing tools or changing the shared definitions",
+    () =>
+      Effect.gen(function* () {
+        const inputSchema = { type: "object", properties: { value: { type: "string" } }, required: ["value"] }
+        const formats = [
+          { type: "text" },
+          { type: "regex", pattern: "[0-9]+" },
+          { type: "lark", grammar: 'start: "x"' },
+        ] as const
+        const tools = {
+          definitions: formats.map(
+            (freeform) => new ToolDefinition({ name: freeform.type, description: "", inputSchema, freeform }),
+          ),
+          execute: () => Effect.die("unused tool execution"),
+        }
+        const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer))
+        const cases: Array<typeof model.capabilities.freeform> = [undefined, [], ["text", "lark"], ["regex"]]
+        for (const supported of cases) {
+          const prepared = yield* requests.primary({
+            session,
+            agent: Agent.ID.make("build"),
+            model: { ...model, capabilities: { ...model.capabilities, freeform: supported } },
+            system: [],
+            messages: [],
+            tools,
+          })
+          expect(
+            prepared.request.tools.map((tool) => tool.type === "tool" && [tool.name, tool.inputSchema, tool.freeform]),
+          ).toEqual(
+            formats.map((format) => [format.type, inputSchema, supported?.includes(format.type) ? format : undefined]),
+          )
+        }
+      }).pipe(Effect.provideService(SessionModelTransport.Service, transport)),
+  )
+
   it.effect("tags every Session request kind on http.request and http.response", () =>
     Effect.gen(function* () {
       const hooks = yield* PluginHooks.Service
@@ -244,6 +280,7 @@ describe("primary stored-media boundary", () => {
   const planned: PlannedMessage[] = [
     {
       role: "user",
+      metadata: { marker: "synthetic-hook-only" },
       content: [
         {
           type: "local-media",
@@ -302,6 +339,7 @@ describe("primary stored-media boundary", () => {
         PluginHooks.plannedContext((event) =>
           Effect.sync(() => {
             seen.push(event.messages[0].content[0].type)
+            expect(event.messages[0].metadata).toEqual({ marker: "synthetic-hook-only" })
             event.messages.push(Message.user("core reminder"))
           }),
         ),
@@ -331,6 +369,7 @@ describe("primary stored-media boundary", () => {
       expect(seen).toEqual(["local-media", "second"])
       expect(reads).toEqual([])
       expect(JSON.stringify(result.request.messages)).toContain("core reminder")
+      expect(JSON.stringify(result.request.messages)).not.toContain("synthetic-hook-only")
       expect(JSON.stringify(result.request.messages)).not.toContain("local-media")
     }),
   )
@@ -352,6 +391,7 @@ describe("primary stored-media boundary", () => {
         Effect.sync(() => {
           seen.push(event.messages[0].content[0].type)
           expect(JSON.stringify(event.messages)).toContain("AQID")
+          expect(event.messages[0].metadata).toEqual({ marker: "synthetic-hook-only" })
         }),
       )
       const requests = yield* service

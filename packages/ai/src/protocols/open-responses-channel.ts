@@ -27,6 +27,7 @@ export interface Options {
   readonly enabled?: (url: string) => boolean
   readonly url?: (url: string) => string
   readonly headers?: (headers: Headers.Headers) => Headers.Headers
+  readonly deferHttpBody?: boolean
   readonly continuation?: OpenResponsesContinuation.Shape
 }
 
@@ -123,7 +124,7 @@ export const transport = <Body>(options: Options): Transport<Body, Prepared, str
     id: http.id,
     prepare: (input) =>
       Effect.gen(function* () {
-        const parts = yield* HttpTransport.jsonRequestParts(input)
+        const parts = yield* HttpTransport.jsonRequestParts(input, !!input.webSocket && options.deferHttpBody)
         const headers = Headers.remove(options.headers?.(parts.headers) ?? parts.headers, "content-length")
         const channel =
           input.webSocket && (options.enabled?.(parts.url) ?? true)
@@ -147,16 +148,21 @@ export const transport = <Body>(options: Options): Transport<Body, Prepared, str
           yield* Effect.logWarning(`${options.name} does not offer WebSocket for this endpoint; using HTTP`, {
             url: parts.url,
           })
+        const prepareHttp = (): Prepared["http"] => ({
+          request: ProviderShared.jsonPost({
+            url: parts.url,
+            body: parts.bodyText,
+            headers: parts.headers,
+            encoding: input.request.http?.encoding,
+          }),
+          framing: Framing.sse,
+          middleware: input.middleware,
+        })
+        if (!channel || !parts.deferredBodyText) return { http: prepareHttp(), channel }
+        let http: Prepared["http"] | undefined
         return {
-          http: {
-            request: ProviderShared.jsonPost({
-              url: parts.url,
-              body: parts.bodyText,
-              headers: parts.headers,
-              encoding: input.request.http?.encoding,
-            }),
-            framing: Framing.sse,
-            middleware: input.middleware,
+          get http() {
+            return (http ??= prepareHttp())
           },
           channel,
         }
