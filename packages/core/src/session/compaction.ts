@@ -1,9 +1,10 @@
+import * as ModelMedia from "./model-media.js"
+import type { SessionStored } from "./stored.js"
 export * as SessionCompaction from "./compaction.js"
 
 import {
   ai,
   AIError,
-  type ContentPart,
   InvalidProviderOutputError,
   isContextOverflowFailure,
   LLMClient,
@@ -104,7 +105,7 @@ type Streamed = {
 
 /** A summary run off the critical path: it covers only `messages`, streams no deltas, and bills into `usage`. */
 type Background = {
-  readonly messages: ReadonlyArray<SessionMessage.Info>
+  readonly messages: ReadonlyArray<SessionStored.Message>
   readonly usage: (usage: SessionUsage.Recorded) => void
 }
 
@@ -850,24 +851,25 @@ export const layer = Layer.effect(
      * output to it would leave next to no room. A prompt the estimate undersells is rejected and shrunk like any
      * other.
      */
-    const prepare = (
+    const prepare = Effect.fnUntraced(function* (
       context: SessionContext.Loaded,
-      messages: ReadonlyArray<SessionMessage.Info>,
+      messages: ReadonlyArray<SessionStored.Message>,
       budget: number,
       webSocket?: "session",
-    ) => {
+    ) {
       const base = transcript(context, messages)
-      return requests.compaction({
+      const canonical = yield* ModelMedia.materialize(base.messages, context.media ?? ModelMedia.emptyResolver)
+      return yield* requests.compaction({
         session: context.session,
         agent: context.agent.id,
         model: context.model,
         tools: context.tools,
         system: base.system,
-        messages: base.messages,
+        messages: canonical,
         webSocket,
         inputTokens: { measured: budget, estimated: 0 },
       })
-    }
+    })
 
     /** A request hook supplied the summary itself, so no model call happens. */
     const fromHook = (context: SessionContext.Loaded, supplied: SessionCompactionResult, background?: Background) => {
@@ -993,13 +995,13 @@ const cacheLifetime = (ttl: string | undefined) => {
 }
 
 /** History loads from the latest completed compaction, so a previous one is always the first message. */
-const previousCompaction = (messages: ReadonlyArray<SessionMessage.Info>) => {
+const previousCompaction = (messages: ReadonlyArray<SessionStored.Message>) => {
   const [first] = messages
   return first?.type === "compaction" && first.status === "completed" ? first : undefined
 }
 
-const transcript = (context: SessionContext.Loaded, messages: ReadonlyArray<SessionMessage.Info>) =>
-  SessionModelRequest.baseTranscript({
+const transcript = (context: SessionContext.Loaded, messages: ReadonlyArray<SessionStored.Message>) =>
+  SessionModelRequest.plannedTranscript({
     agent: context.agent.info,
     model: context.model,
     tools: context.tools,
@@ -1011,7 +1013,7 @@ const transcript = (context: SessionContext.Loaded, messages: ReadonlyArray<Sess
  * The newest messages within `keep` tokens, from `keepID` on, are kept verbatim beside the summary.
  * Undefined when there is nothing to compact.
  */
-const splitConversation = (messages: ReadonlyArray<SessionMessage.Info>, keep: number) => {
+const splitConversation = (messages: ReadonlyArray<SessionStored.Message>, keep: number) => {
   const entries = messages.flatMap((message) => {
     const text = SessionRecentText.messageToText(message)
     return text ? [{ message, text }] : []
@@ -1032,7 +1034,7 @@ const withoutTail = (request: LLMRequest, from: SessionMessage.ID | undefined) =
 }
 
 const recentStart = (
-  entries: ReadonlyArray<{ readonly message: SessionMessage.Info; readonly text: string }>,
+  entries: ReadonlyArray<{ readonly message: SessionStored.Message; readonly text: string }>,
   keep: number,
   previous: SessionMessage.CompactionCompleted | undefined,
 ) => {
@@ -1136,9 +1138,7 @@ export const estimatePrompt = (context: SessionContext.Loaded): Estimate => {
   // TODO: Pass compaction history the runner has already shaped. This and `recentUserMessages` repeat the
   // runner's unsupported-media and image-budget passes; here the image budget only sees images since the anchor,
   // so image-heavy sessions can estimate high.
-  const sent = SessionModelRequest.boundImages(
-    SessionModelRequest.unsupportedParts(base.messages, context.model.capabilities),
-  )
+  const sent = ModelMedia.select(base.messages, context.media ?? ModelMedia.emptyResolver, context.model.capabilities)
   // The anchor's usage covers its own output, but not its local tool results, which the provider never saw.
   const unmeasured = sent.filter((message) => message.role !== "assistant" || message.id !== anchor?.id)
 
@@ -1189,7 +1189,7 @@ const inputWindow = (limit: SessionContext.Loaded["model"]["limit"]) =>
  * Another provider's count may describe a native window this model cannot replay. History then holds the original
  * messages that window stood for, which the count leaves out, so only the current provider's counts are trusted.
  */
-const hasMeasuredPrompt = (message: SessionMessage.Info, model: SessionContext.Loaded["model"]["ref"]) =>
+const hasMeasuredPrompt = (message: SessionStored.Message, model: SessionContext.Loaded["model"]["ref"]) =>
   message.type === "assistant" &&
   message.model.providerID === model.providerID &&
   !message.error &&
@@ -1233,7 +1233,9 @@ const fitOutput = (request: LLMRequest, limit: SessionContext.Loaded["model"]["l
   return { ...request, maxTokens }
 }
 
-const estimateRequest = (request: Pick<LLMRequest, "system" | "tools" | "messages">) =>
+const estimateRequest = (
+  request: Pick<LLMRequest, "system" | "tools"> & { readonly messages: readonly ModelMedia.PlannedMessage[] },
+) =>
   request.system.reduce((sum, part) => sum + Token.estimate(part.text), 0) +
   request.tools.reduce((sum, tool) => sum + estimateTool(tool), 0) +
   request.messages.reduce((sum, message) => sum + estimateMessage(message), 0)
@@ -1247,9 +1249,12 @@ const estimateTool = (tool: ToolEntry): number => {
   )
 }
 
-const estimateMessage = (message: Message) => message.content.reduce((sum, part) => sum + estimatePart(part), 0)
+const estimateMessage = (message: ModelMedia.PlannedMessage) =>
+  message.content.reduce((sum, part) => sum + estimatePart(part), 0)
 
-const estimatePart = (part: ContentPart): number => {
+const estimatePart = (part: ModelMedia.Part): number => {
+  if (part.type === "local-media") return estimateMedia(part.file.mime)
+
   // An encrypted native compaction has no locally measurable size.
   if (part.type === "compaction") return Token.estimate(part.text ?? "")
   if (part.type === "effort") return 0

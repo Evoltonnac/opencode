@@ -42,3 +42,6 @@ export const UserPayload = Schema.Struct({ ...InboxUserPayload.fields, files })
 /** A `session_message` user message as stored, whose files may be refs. */
 export interface User extends Schema.Schema.Type<typeof User> {}
 export const User = Schema.Struct({ ...SessionMessage.User.fields, files })
+
+/** Internal history, before selected local media is loaded. Never a plugin or client payload. */
+export type Message = Exclude<SessionMessage.Info, SessionMessage.User> | User

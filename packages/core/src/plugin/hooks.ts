@@ -1,3 +1,4 @@
+import type { PlannedMessage } from "../session/model-media.js"
 export * as PluginHooks from "./hooks.js"
 
 import type { AISDKHooks } from "@opencode/plugin/effect/aisdk"
@@ -39,7 +40,21 @@ const eventProviderID = (event: unknown) => {
   return typeof model.providerID === "string" ? model.providerID : undefined
 }
 
+/** Core-only context contract. Audited callbacks must not inspect local media payloads. */
+export type PlannedContext = Omit<Domains["session"]["context"], "messages"> & { messages: PlannedMessage[] }
+const plannedCallbacks = new WeakSet<Function>()
+export const plannedContext = <F extends (event: PlannedContext) => Effect.Effect<void>>(callback: F): F => {
+  plannedCallbacks.add(callback)
+  return callback
+}
+
 export interface Interface {
+  /** Capture only the context callbacks used by a single primary request, before media is loaded. */
+  readonly contextSnapshot?: (providerID: string) => Effect.Effect<{
+    readonly has: boolean
+    readonly planned?: (event: PlannedContext) => Effect.Effect<PlannedContext>
+    readonly trigger: (event: Domains["session"]["context"]) => Effect.Effect<Domains["session"]["context"]>
+  }>
   readonly has: <Domain extends keyof Domains>(
     domain: Domain,
     name: keyof Domains[Domain] & keyof Failures[Domain],
@@ -101,7 +116,27 @@ const layer = Layer.effect(
         ),
       )
 
-    return Service.of({ has, register, trigger })
+    const contextSnapshot: NonNullable<Interface["contextSnapshot"]> = (providerID) =>
+      Effect.sync(() => {
+        const selected = callbacks.get(key("session", "context")) ?? []
+        const invoke = <Event extends Domains["session"]["context"] | PlannedContext>(event: Event) =>
+          Effect.gen(function* () {
+            for (const entry of selected) {
+              if (entry.options?.providerID !== undefined && entry.options.providerID !== eventProviderID(event))
+                continue
+              yield* entry.callback(event) as Effect.Effect<void>
+            }
+            return event
+          })
+        return {
+          planned: selected.every((entry) => plannedCallbacks.has(entry.callback)) ? invoke : undefined,
+          has: selected.some(
+            (entry) => entry.options?.providerID === undefined || entry.options.providerID === providerID,
+          ),
+          trigger: invoke,
+        }
+      })
+    return Service.of({ has, register, trigger, contextSnapshot })
   }),
 )
 

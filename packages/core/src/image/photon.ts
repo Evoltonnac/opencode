@@ -8,8 +8,7 @@ import { PhotonNormalize } from "./photon-normalize.js"
 import type { Reply, Request } from "./photon-worker.js"
 
 // The worker holds photon's wasm heap (hundreds of MB after a large image);
-// terminating it when idle returns that memory to the OS.
-const WORKER_IDLE_MILLIS = 10_000
+// this candidate terminates it as soon as the entered batch completes.
 
 export class WorkerUnavailableError extends Schema.TaggedError<WorkerUnavailableError>()(
   "Image.Photon.WorkerUnavailableError",
@@ -19,29 +18,41 @@ export class WorkerUnavailableError extends Schema.TaggedError<WorkerUnavailable
 // Resolves once the worker has loaded photon. Anything else (no worker_threads,
 // a bundle without the worker entry, photon failing to load) means the worker
 // is unavailable, and a worker that never got ready is terminated.
+/** Acquire startup ownership before waiting; failed/interrupted startup cannot orphan a worker. */
+export const spawnWith = (create: Effect.Effect<Worker, WorkerUnavailableError>) =>
+  Effect.acquireUseRelease(
+    create,
+    (worker) =>
+      Effect.callback<Worker, WorkerUnavailableError>((resume) => {
+        const cleanup = () => {
+          worker.off("message", ready).off("error", error).off("exit", exit)
+        }
+        const ready = () => {
+          cleanup()
+          resume(Effect.succeed(worker))
+        }
+        const error = (cause: Error) => {
+          cleanup()
+          resume(Effect.fail(new WorkerUnavailableError({ cause })))
+        }
+        const exit = (code: number) => error(new Error(`photon worker exited with code ${code}`))
+        worker.once("message", ready).once("error", error).once("exit", exit)
+        return Effect.sync(cleanup)
+      }),
+    (worker, exit) =>
+      Exit.isFailure(exit) ? Effect.promise(() => worker.terminate()).pipe(Effect.asVoid) : Effect.void,
+  )
+
 export const spawnWorker = (url?: URL) =>
-  Effect.tryPromise({
-    try: async (signal) => {
-      const { Worker } = await import("node:worker_threads")
-      const worker = new Worker(url ?? new URL("./photon-worker.js", import.meta.url))
-      // Only fires on interruption, which discards the worker even if it just got ready.
-      const abort = () => void worker.terminate()
-      if (signal.aborted) abort()
-      signal.addEventListener("abort", abort, { once: true })
-      try {
-        await new Promise<void>((resolve, reject) => {
-          worker.once("message", () => resolve())
-          worker.once("error", reject)
-          worker.once("exit", (code) => reject(new Error(`photon worker exited with code ${code}`)))
-        })
-      } catch (cause) {
-        void worker.terminate()
-        throw cause
-      }
-      return worker
-    },
-    catch: (cause) => new WorkerUnavailableError({ cause }),
-  })
+  spawnWith(
+    Effect.tryPromise({
+      try: async () => {
+        const { Worker } = await import("node:worker_threads")
+        return new Worker(url ?? new URL("./photon-worker.js", import.meta.url))
+      },
+      catch: (cause) => new WorkerUnavailableError({ cause }),
+    }),
+  )
 
 // A panic or an unreadable reply fails the request the way an in-process
 // photon throw would. The worker is only ref'd while a request is pending.
@@ -66,18 +77,25 @@ const request = (worker: Worker, content: PhotonNormalize.Content, limits: Reado
     return Effect.sync(cleanup)
   })
 
-export function makeWith(spawn: Effect.Effect<Worker, WorkerUnavailableError>, idleMillis = WORKER_IDLE_MILLIS) {
+export function makeWith(spawn: Effect.Effect<Worker, WorkerUnavailableError>) {
   // One request at a time, so a worker never holds a queue that a panic could
   // take down with it, and a stale reply can never answer the next request.
   const permit = Semaphore.makeUnsafe(1)
   let current: Worker | undefined
-  let idle: ReturnType<typeof setTimeout> | undefined
+  let pending = 0
+  let retiring: Promise<void> | undefined
   let useWorker = true
   let photon: Promise<PhotonNormalize.Photon> | undefined
 
-  const discard = (worker: Worker) => {
+  const discard = (worker: Worker): Promise<void> => {
     if (current === worker) current = undefined
-    void worker.terminate()
+    const previous = retiring
+    const termination = worker.terminate().then(() => undefined)
+    const barrier = previous ? Promise.all([previous, termination]).then(() => undefined) : termination
+    retiring = barrier
+    return barrier.finally(() => {
+      if (retiring === barrier) retiring = undefined
+    })
   }
   const track = (worker: Worker) =>
     Effect.sync(() => {
@@ -91,23 +109,17 @@ export function makeWith(spawn: Effect.Effect<Worker, WorkerUnavailableError>, i
       return worker
     })
   // Interruptible only while spawning and while the request runs, so from the
-  // moment a worker exists it is either tracked with an idle timer or discarded.
+  // moment a ready worker exists it is tracked until the entered batch drains or discarded.
   // A failed or interrupted request takes its worker down: the heap may be
   // poisoned, or the worker is still busy with a reply nobody will read.
   const inWorker = (content: PhotonNormalize.Content, limits: Readonly<Limits>) =>
     Effect.uninterruptibleMask((restore) =>
       Effect.gen(function* () {
-        clearTimeout(idle)
+        const exiting = retiring
+        if (exiting) yield* restore(Effect.promise(() => exiting))
         const worker = current ?? (yield* restore(spawn).pipe(Effect.flatMap(track)))
         return yield* restore(request(worker, content, limits)).pipe(
-          Effect.onExit((exit) =>
-            Effect.sync(() => {
-              if (Exit.isFailure(exit)) return discard(worker)
-              // Unref'd so an idle worker never holds the process open.
-              idle = setTimeout(() => discard(worker), idleMillis)
-              idle.unref()
-            }),
-          ),
+          Effect.onExit((exit) => (Exit.isFailure(exit) ? Effect.promise(() => discard(worker)) : Effect.void)),
         )
       }),
     ).pipe(permit.withPermits(1))
@@ -117,7 +129,7 @@ export function makeWith(spawn: Effect.Effect<Worker, WorkerUnavailableError>, i
       catch: () => new ResizerUnavailableError(),
     }).pipe(Effect.map((photon) => PhotonNormalize.normalize(photon, content, limits)))
 
-  return Effect.fn("Image.Photon.normalize")(function* (
+  const normalize = Effect.fn("Image.Photon.normalize")(function* (
     resource: string,
     content: FileSystem.Content & { readonly encoding: "base64" },
     limits: Readonly<Limits>,
@@ -149,6 +161,32 @@ export function makeWith(spawn: Effect.Effect<Worker, WorkerUnavailableError>, i
         return yield* new SizeError({ resource, ...size })
       }
     }
+  })
+  return Effect.fn("Image.Photon.normalizeBatch")(function* (
+    resource: string,
+    content: FileSystem.Content & { readonly encoding: "base64" },
+    limits: Readonly<Limits>,
+  ) {
+    return yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        pending++
+        return yield* restore(normalize(resource, content, limits)).pipe(
+          Effect.ensuring(
+            Effect.suspend(() => {
+              pending--
+              if (pending !== 0) return Effect.void
+              // Recheck under the same request permit, and hold it until termination completes.
+              // A new entrant either joins the batch before this check or waits for cleanup.
+              return Effect.suspend(() => {
+                if (pending !== 0 || !current) return Effect.void
+                const exiting = discard(current)
+                return Effect.promise(() => exiting)
+              }).pipe(permit.withPermits(1))
+            }),
+          ),
+        )
+      }),
+    )
   })
 }
 

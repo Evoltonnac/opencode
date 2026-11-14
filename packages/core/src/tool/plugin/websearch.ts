@@ -1,7 +1,7 @@
+import { PluginHooks } from "../../plugin/hooks.js"
 export * as WebSearchTool from "./websearch.js"
 
 import type { Context } from "@opencode/plugin/effect/plugin"
-import type { SessionHooks } from "@opencode/plugin/effect/session"
 import { ToolFailure } from "@opencode/ai/effect"
 import { Effect, Schema, Semaphore } from "effect"
 import { HttpClientError } from "effect/http"
@@ -179,7 +179,7 @@ export const Plugin = {
       )
       .pipe(Effect.orDie)
 
-    const hook = (event: SessionHooks["context"]) =>
+    const hook = (event: PluginHooks.PlannedContext) =>
       Effect.gen(function* () {
         const disabled = yield* websearch.default().pipe(
           Effect.as(false),
@@ -188,7 +188,7 @@ export const Plugin = {
         // Policy can remove every provider, and the model shouldn't be offered a tool that can't search.
         if (disabled || (yield* websearch.providers()).length === 0) delete event.tools[name]
       })
-    yield* ctx.session.hook("context", hook)
+    yield* ctx.session.hook("context", PluginHooks.plannedContext(hook))
     yield* ctx.session.hook("compaction", hook)
     yield* ctx.session.hook("generate", hook)
   }),

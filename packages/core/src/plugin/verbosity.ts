@@ -1,3 +1,4 @@
+import { PluginHooks } from "./hooks.js"
 export * as VerbosityPlugin from "./verbosity.js"
 
 import { define } from "@opencode/plugin/effect/plugin"
@@ -23,7 +24,7 @@ export const Plugin = define({
   id: "opencode.prompt.verbosity",
   effect: Effect.fn("VerbosityPlugin")(function* (ctx) {
     const models = yield* Model.Service
-    const hook = (event: SessionRequest) =>
+    const hook = (event: Pick<SessionRequest, "model" | "options">) =>
       Effect.gen(function* () {
         if (event.options.textVerbosity !== undefined) return
         const model = yield* models.get(event.model.providerID, event.model.id)
@@ -35,7 +36,7 @@ export const Plugin = define({
         if (variant?.settings?.textVerbosity !== undefined) return
         event.options.textVerbosity = "low"
       })
-    yield* ctx.session.hook("context", hook)
+    yield* ctx.session.hook("context", PluginHooks.plannedContext(hook))
     yield* ctx.session.hook("compaction", hook)
     yield* ctx.session.hook("generate", hook)
     yield* ctx.session.hook("title", hook)

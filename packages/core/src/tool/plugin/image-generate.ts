@@ -6,7 +6,7 @@ import type { Context } from "@opencode/plugin/effect/plugin"
 import type { Document, Entry } from "@opencode/schema/config"
 import { Identifier } from "@opencode/schema/identifier"
 import { Global } from "@opencode/util/global"
-import { Duration, Effect, Schema, Scope, Stream } from "effect"
+import { Duration, Effect, Schema, Scope, Stream, Semaphore } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
 import { toolFailure } from "../runtime.js"
 import { Config } from "../../config.js"
@@ -28,6 +28,8 @@ export const name = "experimental_image_generate"
 export const MAX_INPUT_BYTES = 20 * 1024 * 1024
 const DOWNLOAD_TIMEOUT = Duration.seconds(30)
 const GENERATE_TIMEOUT = Duration.minutes(30)
+// Process-wide: different locations must share the same memory budget.
+const imageGenerationQueue = Semaphore.makeUnsafe(1)
 const INPUT_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"]
 const EXTENSIONS: Record<string, string> = {
   "image/png": ".png",
@@ -153,55 +155,42 @@ export const Plugin = {
       return { model, variant: ref.variant }
     })
 
-    const readImage = Effect.fn("ImageGenerateTool.readImage")(function* (
+    // Authorize before enqueueing. Queue closures retain paths, not image buffers.
+    const prepareImage = Effect.fn("ImageGenerateTool.prepareImage")(function* (
       source: string,
       context: FileAccess.Invocation,
     ) {
-      const bytes = /^https?:\/\//i.test(source)
-        ? yield* Effect.gen(function* () {
-            // Downloads follow the same rule as the webfetch tool, so denying web access also covers image URLs.
-            yield* permission.assert({
-              action: "webfetch",
-              resources: [source],
-              save: ["*"],
-              metadata: { url: source },
-              ...Permission.invocation(context),
-            })
-            return yield* Effect.gen(function* () {
-              const response = yield* http
-                .execute(HttpClientRequest.get(source))
-                .pipe(Effect.flatMap(HttpClientResponse.filterStatusOk))
-              return yield* collectBoundedResponseBody(
-                response,
-                MAX_INPUT_BYTES,
-                () => new ToolFailure({ message: `${source} is larger than 20 MiB.` }),
+      const remote = /^https?:\/\//i.test(source)
+      const target = remote ? undefined : yield* access.authorizeRead(source, context)
+      if (remote) yield* permission.assert({
+        action: "webfetch", resources: [source], save: ["*"],
+        metadata: { url: source }, ...Permission.invocation(context),
+      })
+      return Effect.gen(function* () {
+        const bytes = target
+          ? yield* Effect.gen(function* () {
+              const info = yield* environment.files.stat(target.absolute).pipe(
+                Effect.catchTag("Environment.NotFound", () => new ToolFailure({ message: `File not found: ${source}` })),
               )
+              if (info.size > MAX_INPUT_BYTES)
+                return yield* new ToolFailure({ message: `${source} is larger than 20 MiB.` })
+              return (yield* environment.files.read(target.absolute)).bytes
+            })
+          : yield* Effect.gen(function* () {
+              const response = yield* http.execute(HttpClientRequest.get(source))
+                .pipe(Effect.flatMap(HttpClientResponse.filterStatusOk))
+              return yield* collectBoundedResponseBody(response, MAX_INPUT_BYTES,
+                () => new ToolFailure({ message: `${source} is larger than 20 MiB.` }))
             }).pipe(
-              Effect.timeoutOrElse({
-                duration: DOWNLOAD_TIMEOUT,
-                orElse: () => Effect.fail(new ToolFailure({ message: `Timed out downloading ${source}.` })),
-              }),
+              Effect.timeoutOrElse({ duration: DOWNLOAD_TIMEOUT,
+                orElse: () => Effect.fail(new ToolFailure({ message: `Timed out downloading ${source}.` })), }),
               Effect.mapError(toolFailure(`Unable to download ${source}`)),
             )
-          })
-        : yield* Effect.gen(function* () {
-            const target = yield* access.authorizeRead(source, context)
-            const info = yield* environment.files
-              .stat(target.absolute)
-              .pipe(
-                Effect.catchTag(
-                  "Environment.NotFound",
-                  () => new ToolFailure({ message: `File not found: ${source}` }),
-                ),
-              )
-            if (info.size > MAX_INPUT_BYTES)
-              return yield* new ToolFailure({ message: `${source} is larger than 20 MiB.` })
-            return (yield* environment.files.read(target.absolute)).bytes
-          })
-      const mime = Mime.detect(bytes)
-      if (!INPUT_TYPES.includes(mime))
-        return yield* new ToolFailure({ message: `${source} is not a PNG, JPEG, WebP or GIF image.` })
-      return { data: Buffer.from(bytes).toString("base64"), mime, name: path.basename(source) }
+        const mime = Mime.detect(bytes)
+        if (!INPUT_TYPES.includes(mime))
+          return yield* new ToolFailure({ message: `${source} is not a PNG, JPEG, WebP or GIF image.` })
+        return { data: Buffer.from(bytes).toString("base64"), mime, name: path.basename(source) }
+      })
     })
 
     const notifyWhenDone = Effect.fn("ImageGenerateTool.notifyWhenDone")(
@@ -288,12 +277,14 @@ export const Plugin = {
                   ...Permission.invocation(context),
                 })
               }
-              const images = input.images
-                ? yield* Effect.forEach(input.images, (image) => readImage(image, context))
+              const preparedImages = input.images
+                ? yield* Effect.forEach(input.images, (image) => prepareImage(image, context))
                 : undefined
 
-              // Everything that needs the user or can fail fast happened above; the paid call runs as a background job.
+              // Initial permissions are resolved above; loading and generation run inside the queued background job.
               const run = Effect.gen(function* () {
+                const image = yield* imageGenerationQueue.withPermit(Effect.gen(function* () {
+                const images = preparedImages ? yield* Effect.all(preparedImages, { concurrency: 1 }) : undefined
                 const result = yield* generate
                   .image({
                     model: Model.Ref.make({
@@ -311,7 +302,9 @@ export const Plugin = {
                       orElse: () => Effect.fail(new Error("Image generation timed out after 30 minutes.")),
                     }),
                   )
-                const image = result.images[0]
+                return result.images[0]
+                }))
+                // Release the memory-heavy generation slot before any extra output-file approval.
                 if (!image) return yield* Effect.fail(new Error(`${ref} returned no image.`))
                 const bytes = Buffer.from(image.data, "base64")
                 const file = stem + (EXTENSIONS[Mime.detect(bytes)] ?? ".png")

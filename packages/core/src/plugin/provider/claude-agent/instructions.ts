@@ -1,3 +1,4 @@
+import { PluginHooks } from "../../hooks.js"
 export * as ClaudeInstructions from "./instructions.js"
 
 import type { SystemPart } from "@opencode/ai/effect"
@@ -23,13 +24,14 @@ export const register = Effect.fn("ClaudeInstructions.register")(function* (ctx:
     (kind) =>
       ctx.session.hook(
         kind,
-        (event) =>
+        PluginHooks.plannedContext((event) =>
           Effect.gen(function* () {
             const agent = yield* ctx.agent.get({ agentID: event.agent }).pipe(Effect.orDie)
             // Read the role from the resolved agent, not by guessing which prompt text is a built-in.
             event.options[ClaudeSystemPrompt.AGENT_OPTION] = agent.data.system ?? ""
             event.options[ClaudeSystemPrompt.INSTRUCTIONS_OPTION] = instructions(event.system)
           }),
+        ),
         { providerID: ClaudeProvider.ID },
       ),
     { discard: true },

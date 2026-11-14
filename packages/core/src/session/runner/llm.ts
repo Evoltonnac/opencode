@@ -1,3 +1,4 @@
+import * as ModelMedia from "../model-media.js"
 export * as SessionRunnerLLM from "./llm.js"
 
 import { Message } from "@opencode/ai/effect"
@@ -259,7 +260,7 @@ const layer = Layer.effect(
         }
         yield* compaction.precompute(Effect.succeed(loaded), estimate)
         const stepLimitReached = loaded.agent.info.steps !== undefined && step >= loaded.agent.info.steps
-        const transcript = SessionModelRequest.baseTranscript({
+        const transcript = SessionModelRequest.plannedTranscript({
           agent: loaded.agent.info,
           model: loaded.model,
           tools: loaded.tools,
@@ -273,9 +274,13 @@ const layer = Layer.effect(
             model: loaded.model,
             tools: loaded.tools,
             system: transcript.system,
-            messages: stepLimitReached
-              ? [...transcript.messages, Message.assistant(MAX_STEPS_PROMPT)]
-              : transcript.messages,
+            messages: [],
+            planned: {
+              messages: stepLimitReached
+                ? [...transcript.messages, Message.assistant(MAX_STEPS_PROMPT)]
+                : transcript.messages,
+              resolver: loaded.media ?? ModelMedia.emptyResolver,
+            },
             // Keep tool definitions on the final Step to preserve the provider's cached prefix.
             toolChoice: stepLimitReached ? "none" : undefined,
             webSocket: "session",

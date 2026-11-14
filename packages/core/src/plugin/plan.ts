@@ -1,3 +1,4 @@
+import { PluginHooks } from "./hooks.js"
 export * as PlanPlugin from "./plan.js"
 
 import { Message, ToolFailure } from "@opencode/ai/effect"
@@ -54,23 +55,26 @@ export const Plugin = define({
 
     // Compaction and committed reverts can strip reminders while the session's agent stays
     // put. Reconcile per request, appending near the tail so the cached prefix stays warm.
-    yield* ctx.session.hook("context", (event) => {
-      const reminder = lastReminder(event.messages, enterReminder)
-      const missing = event.agent === plan && reminder !== enterReminder
-      const stale = event.agent !== plan && reminder === enterReminder
-      const text = missing ? enterReminder : stale ? leave : undefined
-      if (!text) return Effect.void
-      // Before the user's prompt, matching where agent-switch reminders land.
-      const at = event.messages.at(-1)?.role === "user" ? event.messages.length - 1 : event.messages.length
-      event.messages.splice(at, 0, Message.user(text))
-      return ctx.session
-        .synthetic({ sessionID: event.sessionID, text, resume: false })
-        .pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("failed to persist Plan mode reminder", { sessionID: event.sessionID, cause }),
-          ),
-        )
-    })
+    yield* ctx.session.hook(
+      "context",
+      PluginHooks.plannedContext((event) => {
+        const reminder = lastReminder(event.messages, enterReminder)
+        const missing = event.agent === plan && reminder !== enterReminder
+        const stale = event.agent !== plan && reminder === enterReminder
+        const text = missing ? enterReminder : stale ? leave : undefined
+        if (!text) return Effect.void
+        // Before the user's prompt, matching where agent-switch reminders land.
+        const at = event.messages.at(-1)?.role === "user" ? event.messages.length - 1 : event.messages.length
+        event.messages.splice(at, 0, Message.user(text))
+        return ctx.session
+          .synthetic({ sessionID: event.sessionID, text, resume: false })
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("failed to persist Plan mode reminder", { sessionID: event.sessionID, cause }),
+            ),
+          )
+      }),
+    )
 
     yield* ctx.event.subscribe({ types: ["session.created", "session.agent.selected"] }).pipe(
       Stream.runForEach((event) => {
@@ -107,7 +111,7 @@ function switchReminder(
   return undefined
 }
 
-function lastReminder(messages: ReadonlyArray<Message>, enterReminder: string) {
+function lastReminder(messages: PluginHooks.PlannedContext["messages"], enterReminder: string) {
   return messages.reduce<string | undefined>((found, message) => {
     const part = message.role === "user" && message.content.length === 1 ? message.content[0] : undefined
     if (part?.type !== "text") return found

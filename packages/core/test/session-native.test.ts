@@ -1,3 +1,4 @@
+import * as ModelMedia from "../src/session/model-media"
 import { expect, test } from "bun:test"
 import { CompactionPart, LanguageModel, Message, ToolCallPart, Media } from "@opencode/ai/effect"
 import { OpenAIResponses } from "@opencode/ai/protocols"
@@ -247,9 +248,13 @@ it.effect(
         const replayed = yield* s.load(target)
         expect(Instructions.join(replayed.initial)).toBe("changed instructions")
         expect(
-          toLLMMessages(
-            replayed.entries.map((entry) => entry.message),
-            model.ref,
+          yield* ModelMedia.materialize(
+            ModelMedia.plan(
+              replayed.entries.map((entry) => entry.message),
+              model.ref,
+              model.model.provider,
+            ),
+            ModelMedia.emptyResolver,
           ),
         ).toEqual([
           ...replacement,
@@ -264,10 +269,14 @@ it.effect(
           const expanded = yield* s.load(incompatible)
           expect(Instructions.join(expanded.initial)).toBe("changed instructions")
           expect(
-            toLLMMessages(
-              expanded.entries.map((entry) => entry.message),
-              model.ref,
-            ).map((message) => message.content),
+            (yield* ModelMedia.materialize(
+              ModelMedia.plan(
+                expanded.entries.map((entry) => entry.message),
+                model.ref,
+                model.model.provider,
+              ),
+              ModelMedia.emptyResolver,
+            )).map((message) => message.content),
           ).toEqual([
             [Message.text("original request")],
             [Message.text("newest instructions")],
@@ -276,7 +285,7 @@ it.effect(
         }
         const preview = yield* SessionHistory.preview(s.db, sessionID, s.instructions, target)
         expect(Instructions.join(preview.initial)).toBe("changed instructions")
-        expect(preview.messages).toEqual(replayed.entries.map((entry) => entry.message))
+        expect<unknown>(preview.messages).toEqual(replayed.entries.map((entry) => entry.message))
         const store = yield* SessionStore.Service
         expect((yield* store.messages({ sessionID })).map((message) => message.type)).toEqual([
           "user",
@@ -330,10 +339,14 @@ it.effect("falls back to an earlier compatible native or local checkpoint", () =
     expect(replayed.entries.map((entry) => entry.message.type)).toEqual(["compaction", "user", "system"])
     expect(replayed.entries[0]?.message).toMatchObject({ native, model: model.ref })
     expect(
-      toLLMMessages(
-        replayed.entries.map((entry) => entry.message),
-        model.ref,
-      ).filter((message) => message.role === "system"),
+      (yield* ModelMedia.materialize(
+        ModelMedia.plan(
+          replayed.entries.map((entry) => entry.message),
+          model.ref,
+          model.model.provider,
+        ),
+        ModelMedia.emptyResolver,
+      )).filter((message) => message.role === "system"),
     ).toEqual([Message.system("post-epoch update")])
     const local = yield* s.load("local")
     expect(Instructions.join(local.initial)).toBe("new native baseline")

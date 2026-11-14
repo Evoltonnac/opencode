@@ -1,7 +1,7 @@
+import { PluginHooks } from "./hooks.js"
 export * as WarmingPlugin from "./warming.js"
 
 import { define } from "@opencode/plugin/effect/plugin"
-import type { SessionHooks } from "@opencode/plugin/effect/session"
 import type { Provider } from "@opencode/schema/provider"
 import type { Session } from "@opencode/schema/session"
 import { ConfigWarming } from "@opencode/schema/config/warming"
@@ -41,7 +41,7 @@ export const Plugin = define({
   effect: Effect.fn(function* (ctx) {
     const config = yield* Config.Service
     // A model's or provider's `cache.warming` overrides the top-level `warming`.
-    const decide = Effect.fn("WarmingPlugin.decide")(function* (event: SessionHooks["context"]) {
+    const decide = Effect.fn("WarmingPlugin.decide")(function* (event: PluginHooks.PlannedContext) {
       // Warming must never fail the request it hooks, so an unreadable catalog falls back to the top-level setting.
       const cache = (yield* resolveModel(ctx, event).pipe(Effect.orElseSucceed(() => undefined)))?.settings?.cache
       const local = cache?.warming === undefined ? undefined : Option.getOrUndefined(decodeWarming(cache.warming))
@@ -130,7 +130,7 @@ export const Plugin = define({
       }
     })
 
-    const hook = (tracked: boolean) => (event: SessionHooks["context"]) =>
+    const hook = (tracked: boolean) => (event: PluginHooks.PlannedContext) =>
       Effect.gen(function* () {
         const session = yield* ctx.session.get({ sessionID: event.sessionID }).pipe(Effect.orDie)
         if (session.parentID) return
@@ -172,7 +172,7 @@ export const Plugin = define({
             }),
         })
       })
-    yield* ctx.session.hook("context", hook(true))
+    yield* ctx.session.hook("context", PluginHooks.plannedContext(hook(true)))
     yield* ctx.session.hook("compaction", hook(true))
     // Generate requests report no end, so they don't count as running.
     yield* ctx.session.hook("generate", hook(false))
@@ -209,7 +209,7 @@ export const Plugin = define({
   }),
 })
 
-function text(event: SessionHooks["context"]) {
+function text(event: PluginHooks.PlannedContext) {
   const message = event.messages.at(-1)
   if (message?.role !== "user" || message.content.length !== 1) return
   const part = message.content[0]

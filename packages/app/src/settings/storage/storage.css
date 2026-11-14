@@ -1,0 +1,57 @@
+.settings-storage {
+  .settings-storage-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .settings-storage-percentage {
+    font-variant-numeric: tabular-nums;
+  }
+  .settings-storage-capacity {
+    display: flex;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-block: 12px;
+  }
+  .settings-storage-capacity [data-component="input"] {
+    flex: 1 1 140px;
+    min-width: 0;
+    max-width: 240px;
+  }
+  .settings-storage-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-top: 32px;
+  }
+  .settings-storage-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-block: 12px;
+  }
+  .settings-storage-list > div {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  dd {
+    margin: 0;
+    font-variant-numeric: tabular-nums;
+  }
+  summary {
+    cursor: pointer;
+  }
+  .settings-storage-details p + p {
+    margin-top: 8px;
+  }
+  &[data-severity="warning"] [data-slot="progress-fill"] {
+    background-color: var(--v2-state-fg-warning);
+  }
+  &[data-severity="danger"] [data-slot="progress-fill"] {
+    background-color: var(--v2-state-fg-danger);
+  }
+}

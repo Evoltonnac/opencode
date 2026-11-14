@@ -17,7 +17,7 @@ import { SessionHistory } from "../history.js"
 import { SessionRecentText } from "../recent-text.js"
 import type { FileAttachment } from "@opencode/schema/prompt"
 
-const imageMimes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"])
+export const imageMimes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"])
 
 const media = (file: FileAttachment): MediaPart => ({
   type: "media",
@@ -25,7 +25,7 @@ const media = (file: FileAttachment): MediaPart => ({
   filename: file.name,
 })
 
-const attachmentLocation = (file: FileAttachment) => {
+export const attachmentLocation = (file: Pick<FileAttachment, "source">) => {
   if (file.source.type !== "uri") return undefined
   const url = URL.parse(file.source.uri)
   if (url?.protocol !== "file:") return undefined
@@ -60,7 +60,7 @@ const directoryAttachment = (file: FileAttachment): TextPart => ({
     .join("\n")}`,
 })
 
-const attachmentContent = (file: FileAttachment): Array<TextPart | MediaPart> => {
+export const attachmentContent = (file: FileAttachment): Array<TextPart | MediaPart> => {
   if (file.mime === "text/plain") return [textAttachment(file)]
   if (file.mime === "application/x-directory") return [directoryAttachment(file)]
   if (imageMimes.has(file.mime) || file.mime === "application/pdf") {
