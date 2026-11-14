@@ -24,6 +24,7 @@ export interface JsonRequestParts<Body = unknown> {
   readonly url: string
   readonly jsonBody: Body | Record<string, unknown>
   readonly bodyText: string
+  readonly deferredBodyText?: true
   readonly headers: Headers.Headers
 }
 
@@ -43,25 +44,99 @@ const bodyWithOverlay = <Body>(body: Body, request: LLMRequest, encodeBody: (bod
     return yield* ProviderShared.invalidRequest("http.body can only overlay JSON object request bodies")
   })
 
-export const jsonRequestParts = <Body>(input: JsonRequestInput<Body>) =>
+const unsupportedSnapshot = Symbol("non-JSON request body")
+
+// Copy only containers so later mutations cannot change the fallback body. Scalar strings (including
+// large inline images) remain shared. Exotic objects keep the old eager, exact encoder semantics.
+const snapshotBody = <Body>(body: Body): Body | undefined => {
+  const ancestors = new Set<object>()
+  const copy = (value: unknown, depth: number): unknown => {
+    if (
+      value === null ||
+      value === undefined ||
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    )
+      return value
+    if (typeof value !== "object" || depth >= 128 || ancestors.has(value)) throw unsupportedSnapshot
+    const proto = Object.getPrototypeOf(value)
+    const array = Array.isArray(value)
+    if (array ? proto !== Array.prototype : proto !== Object.prototype && proto !== null) throw unsupportedSnapshot
+    ancestors.add(value)
+    // A null-prototype container also preserves real "__proto__" keys without an assignment setter.
+    const result = array ? [] : Object.create(null)
+    const keys = Object.keys(value)
+    if (array && keys.length !== (value as unknown[]).length) throw unsupportedSnapshot
+    for (const [index, key] of keys.entries()) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)
+      if (!descriptor || !("value" in descriptor) || key === "toJSON" || (array && key !== String(index)))
+        throw unsupportedSnapshot
+      result[key] = copy(descriptor.value, depth + 1)
+    }
+    // JSON.stringify also checks a non-enumerable toJSON property.
+    if (Object.hasOwn(value, "toJSON")) throw unsupportedSnapshot
+    ancestors.delete(value)
+    return result
+  }
+  try {
+    return copy(body, 0) as Body
+  } catch {
+    return undefined
+  }
+}
+
+export const jsonRequestParts = <Body>(
+  input: JsonRequestInput<Body>,
+  deferBodyText = false,
+): Effect.Effect<JsonRequestParts<Body>, AIError> =>
   Effect.gen(function* () {
     const endpoint = renderEndpoint(input.endpoint, { request: input.request, body: input.body })
     if (input.request.http?.query) {
       Object.entries(input.request.http.query).forEach(([key, value]) => endpoint.searchParams.set(key, value))
     }
     const url = endpoint.toString()
-    const body = yield* bodyWithOverlay(input.body, input.request, input.encodeBody)
-    const headers = yield* Auth.toEffect(input.auth)({
+    const deferred =
+      deferBodyText &&
+      Auth.isBodyIndependent(input.auth) &&
+      input.request.http?.body === undefined &&
+      input.encodeBody === ProviderShared.encodeJson
+        ? snapshotBody(input.body)
+        : undefined
+    const body =
+      deferred === undefined ? yield* bodyWithOverlay(input.body, input.request, input.encodeBody) : undefined
+    let bodyText = body?.bodyText
+    const text = () => (bodyText ??= input.encodeBody(deferred!))
+    const authInput = {
       request: input.request,
-      method: "POST",
+      method: "POST" as const,
       url,
-      body: body.bodyText,
-      headers: Headers.fromInput({
-        ...input.headers?.({ request: input.request }),
-        ...input.request.headers,
-      }),
+    }
+    const requestHeaders = Headers.fromInput({
+      ...input.headers?.({ request: input.request }),
+      ...input.request.headers,
     })
-    return { url, jsonBody: body.jsonBody, bodyText: body.bodyText, headers }
+    const headers = yield* Auth.toEffect(input.auth)(
+      body
+        ? { ...authInput, body: body.bodyText, headers: requestHeaders }
+        : {
+            ...authInput,
+            get body() {
+              return text()
+            },
+            headers: requestHeaders,
+          },
+    )
+    if (body) return { url, ...body, headers } satisfies JsonRequestParts
+    return {
+      url,
+      jsonBody: input.body,
+      get bodyText() {
+        return text()
+      },
+      deferredBodyText: true,
+      headers,
+    } satisfies JsonRequestParts
   })
 
 export interface HttpJsonInput<_Body, Frame> {

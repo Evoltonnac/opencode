@@ -51,7 +51,12 @@ const credential = (load: Effect.Effect<Redacted.Redacted, CredentialError>): Cr
   return self
 }
 
-const auth = (apply: Definition["apply"]): Definition => {
+const independent = new WeakSet<Definition>()
+
+/** Only audited built-in auth may be handed an input with deferred body text. */
+export const isBodyIndependent = (definition: Definition) => independent.has(definition)
+
+const auth = (apply: Definition["apply"], bodyIndependent = false): Definition => {
   const self: Definition = {
     apply,
     andThen: (that) =>
@@ -59,12 +64,14 @@ const auth = (apply: Definition["apply"]): Definition => {
     orElse: (that) => auth((input) => apply(input).pipe(Effect.catch(() => that.apply(input)))),
     pipe: (f) => f(self),
   }
+  if (bodyIndependent) independent.add(self)
   return self
 }
 
 const fromCredential = (source: Credential, render: (secret: string) => Headers.Input) =>
-  auth((input) =>
-    source.load.pipe(Effect.map((secret) => Headers.setAll(input.headers, render(Redacted.value(secret))))),
+  auth(
+    (input) => source.load.pipe(Effect.map((secret) => Headers.setAll(input.headers, render(Redacted.value(secret))))),
+    true,
   )
 
 const secretEffect = (secret: string | Redacted.Redacted, source: string) => {
@@ -100,12 +107,12 @@ export const config = (name: string) =>
 
 export const effect = (load: Effect.Effect<Redacted.Redacted, CredentialError>) => credential(load)
 
-export const none = auth((input) => Effect.succeed(input.headers))
+export const none = auth((input) => Effect.succeed(input.headers), true)
 
 export const headers = (input: Headers.Input) =>
-  auth((inputAuth) => Effect.succeed(Headers.setAll(inputAuth.headers, input)))
+  auth((inputAuth) => Effect.succeed(Headers.setAll(inputAuth.headers, input)), true)
 
-export const remove = (name: string) => auth((input) => Effect.succeed(Headers.remove(input.headers, name)))
+export const remove = (name: string) => auth((input) => Effect.succeed(Headers.remove(input.headers, name)), true)
 
 export const custom = (apply: (input: AuthInput) => Effect.Effect<Headers.Headers, AIError>) => auth(apply)
 
