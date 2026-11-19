@@ -9,6 +9,7 @@ import { PlatformProvider } from "@/runtime/platform/platform"
 import { createWebPlatform } from "@/runtime/platform/web"
 import { isStandalone, PwaRoutePersistence, restorePwaRoute } from "@/runtime/platform/pwa"
 import { KeyboardInsets } from "@/runtime/platform/keyboard"
+import { restoreSessionImageBlur } from "@/runtime/platform/session-image-blur"
 import en from "@/runtime/i18n/en"
 import zh from "@/runtime/i18n/zh"
 import { authFromToken } from "@/runtime/server/api"
@@ -78,6 +79,7 @@ if (import.meta.env.VITE_SENTRY_DSN) {
 if (root instanceof HTMLElement && root.dataset.opencodeMounted === undefined) {
   // Lazy chunks can import the entry chunk back under a distinct URL, so claim the root before async startup.
   root.dataset.opencodeMounted = ""
+  restoreSessionImageBlur()
   void loadInitialLocale().then((locale) => {
     const auth = authFromToken(new URLSearchParams(location.search).get("auth_token"))
     clearAuthToken()

@@ -3,6 +3,26 @@
 @import "@opencode/ui/styles/tokens";
 @import "tw-animate-css";
 
+/* The document preference is set before mounting, including for portaled previews and their flight images. */
+html[data-session-images-blurred]
+  :is(
+    :is([data-slot="session-timeline-scroll"], [data-component="session-timeline"])
+      img:not(
+        [data-markdown-favicon],
+        [data-slot="site-icon-image"],
+        [data-slot="avatar-image"],
+        [data-slot="project-avatar-image"],
+        [data-component="app-icon"]
+      ),
+    [data-slot="user-message-attachment-image"],
+    [data-slot="composer-attachment-image"],
+    [data-session-image-preview] img
+  ) {
+  filter: blur(48px);
+  clip-path: inset(0);
+  transition: none;
+}
+
 /* Set on the timeline viewport and changed on every frame while the composer region grows. Neither inherits, so a change
    restyles the viewport alone instead of every row inside it. */
 @property --session-timeline-inset {

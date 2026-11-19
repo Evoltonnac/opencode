@@ -813,6 +813,7 @@ export const dict = {
   "common.copied": "Copied",
 
   "titlebar.tabs": "Tabs",
+  "titlebar.blurSessionImages": "Blur chat images",
 
   "common.closeTab": "Close tab",
   "common.closeOtherTabs": "Close other tabs",

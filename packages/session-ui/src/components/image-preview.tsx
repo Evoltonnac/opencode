@@ -16,7 +16,10 @@ export function createImagePreview() {
     const alt = image.alt || i18n.t("ui.imagePreview.alt")
     event.preventDefault()
     event.stopPropagation()
-    dialog.show(() => <ImagePreview src={src} alt={alt} origin={image} />)
+    const sessionImage = !!image.closest(
+      ':is([data-slot="session-timeline-scroll"], [data-component="session-timeline"])',
+    )
+    dialog.show(() => <ImagePreview src={src} alt={alt} origin={image} sessionImage={sessionImage} />)
   }
 
   return (root: HTMLElement) => {

@@ -61,6 +61,8 @@ export interface ImagePreviewProps {
   alt?: string
   /** The image on the page that the preview grows out of and shrinks back into. */
   origin?: HTMLElement
+  /** Opt a conversation image and its flying stand-in into the Web app's display preference. */
+  sessionImage?: boolean
   /**
    * A video on the page to show instead of the image. The preview borrows this element, so it keeps playing as it
    * flies out of its place and back, and returns it once the close lands.
@@ -700,6 +702,7 @@ export function ImagePreview(props: ImagePreviewProps) {
     <div
       ref={root}
       data-component="image-preview"
+      data-session-image-preview={props.sessionImage ? "" : undefined}
       data-stage={selectFlightStage(flight())}
       // Zoomed in, the first Escape zooms back out; the dialog stack leaves it to the preview.
       data-owns-escape={shown.ownsEscape ? "" : undefined}

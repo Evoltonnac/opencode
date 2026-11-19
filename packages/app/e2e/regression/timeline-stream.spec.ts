@@ -3,7 +3,13 @@ import type { SessionMessageAssistant, SessionMessageInfo, ShellInfo } from "@op
 import { timelinePresets } from "@opencode/session-ui/timeline/detail"
 import { createTwoFilesPatch } from "diff"
 import { readSessionDraftText } from "../utils/drafts"
-import { holdRoute } from "../utils/app"
+import { holdRoute, pageMessagesFrom, sessionHref } from "../utils/app"
+import {
+  mockPrivacyFixtureImages,
+  privacyFixtureFile,
+  privacyFixtureImage,
+  samplePrivacyImageFrames,
+} from "../utils/session-image-blur"
 import {
   assistantID,
   assistantMessage,
@@ -44,6 +50,152 @@ const completed = {
   content: [{ type: "text", text: "Working" }],
   time: { created: 2, completed: 3 },
 } satisfies SessionMessageAssistant
+
+test("chat image privacy applies on the first frame after reload, streaming and opening a preview", async ({
+  page,
+}) => {
+  await mockPrivacyFixtureImages(page)
+  const frames = await samplePrivacyImageFrames(page)
+  const source = (name: string) => new URL(`privacy-fixture-${name}.png`, test.info().project.use.baseURL).href
+  const otherID = "ses_privacy_other"
+  const afterReloadPart = "prt_privacy_delayed"
+  const history = [
+    userMessage([
+      userText("Synthetic privacy check"),
+      {
+        id: "prt_privacy_attachment",
+        type: "file",
+        mime: "image/png",
+        filename: "privacy-attachment.png",
+        url: privacyFixtureImage,
+      },
+    ]),
+    assistantMessage(
+      [
+        textPart("prt_privacy_history", `![privacy-history](${source("history")})`),
+        textPart(afterReloadPart, "A streamed image will appear here."),
+        toolPart("prt_privacy_tool", "read", "completed", { path: `${directory}/images/privacy-tool.png` }),
+      ],
+      { completed: false },
+    ),
+  ]
+  const timeline = await setupTimeline(page, {
+    sessions: [session(), session({ id: otherID, title: "Other privacy session" })],
+    tabs: [sessionID, otherID],
+    pageMessages: pageMessagesFrom({
+      [sessionID]: history,
+      [otherID]: [
+        userMessage(),
+        assistantMessage([textPart("prt_privacy_other", `![privacy-other](${source("other")})`)]),
+      ],
+    }),
+    fileContent: (path) => (path === "privacy-tool.png" ? privacyFixtureFile : ""),
+    settings: { timelineDetail: { ...detailed, tools: { placement: "separate" } } },
+  })
+  const toggle = page.getByRole("button", { name: "Blur chat images", exact: true })
+  const historyImage = page.locator('img[alt="privacy-history"]')
+  const attachment = page.locator('img[alt="privacy-attachment.png"]')
+  await expect(toggle).toHaveAttribute("aria-pressed", "false")
+  await expect(historyImage).toHaveJSProperty("naturalWidth", 240)
+  await expect(attachment).toHaveJSProperty("naturalWidth", 240)
+  await expect(historyImage).toHaveCSS("filter", "none")
+  await toggle.focus()
+  await toggle.press("Space")
+  await expect(toggle).toHaveAttribute("aria-pressed", "true")
+  await expect(historyImage).toHaveCSS("filter", "blur(48px)")
+  await expect(attachment).toHaveCSS("filter", "blur(48px)")
+
+  const entry = await holdRoute(page, /\/(?:_assets\/index-[^/]+\.js|src\/entry\.tsx)(?:\?.*)?$/)
+  const reload = page.reload()
+  await entry.arrived
+  try {
+    await expect(page.locator("html")).toHaveAttribute("data-session-images-blurred", "")
+    await expect(historyImage).toHaveCount(0)
+  } finally {
+    entry.release()
+  }
+  await reload
+  await timeline.transport.waitForConnection()
+  await expect(toggle).toHaveAttribute("aria-pressed", "true")
+  await expect(historyImage).toHaveJSProperty("naturalWidth", 240)
+  await expect(attachment).toHaveJSProperty("naturalWidth", 240)
+
+  const lateImage = await holdRoute(page, "**/privacy-fixture-streamed.png")
+  await timeline.send(partDelta(afterReloadPart, `\n\n![privacy-streamed](${source("streamed")})`))
+  await lateImage.arrived
+  const streamed = page.locator('img[alt="privacy-streamed"]')
+  try {
+    await expect(streamed).toHaveCSS("filter", "blur(48px)")
+    await expect.poll(frames).toContainEqual({ name: "privacy-streamed", phase: "inserted", protected: true })
+  } finally {
+    lateImage.release()
+  }
+  await expect(streamed).toHaveJSProperty("naturalWidth", 240)
+
+  const toolResponse = await holdRoute(page, "**/api/fs/read/**/privacy-tool.png?*")
+  await page.getByRole("button", { name: "Read privacy-tool.png", exact: true }).click()
+  await toolResponse.arrived
+  const toolImage = page.locator('img[alt="privacy-tool.png"]')
+  try {
+    await expect(toolImage).toHaveCSS("filter", "blur(48px)")
+    await expect.poll(frames).toContainEqual({ name: "privacy-tool.png", phase: "inserted", protected: true })
+  } finally {
+    toolResponse.release()
+  }
+  await expect(toolImage).toHaveJSProperty("naturalWidth", 240)
+
+  await historyImage.click()
+  const preview = page.locator('[data-component="image-preview"]')
+  await expect(preview).toHaveAttribute("data-session-image-preview", "")
+  await expect(preview.locator('[data-slot="image-preview-image"]')).toHaveCSS("filter", "blur(48px)")
+  await expect(preview.locator('[data-slot="image-preview-flight"]')).toHaveCSS("filter", "blur(48px)")
+  await expect.poll(frames).toEqual(
+    expect.arrayContaining([
+      { name: "image-preview-image", phase: "loaded", protected: true },
+      { name: "image-preview-flight", phase: "loaded", protected: true },
+    ]),
+  )
+  await page.keyboard.press("Escape")
+  await expect(preview).toBeHidden()
+
+  await page.locator(`[data-titlebar-tab-link][href="${sessionHref(otherID)}"]`).click()
+  const otherImage = page.locator('img[alt="privacy-other"]')
+  await expect(otherImage).toHaveJSProperty("naturalWidth", 240)
+  await expect(otherImage).toHaveCSS("filter", "blur(48px)")
+  await page.setViewportSize({ width: 375, height: 720 })
+  await expect(toggle).toBeInViewport()
+
+  await page.locator('[data-slot="titlebar-v2"]').evaluate((bar, url) => {
+    const badge = document.createElement("img")
+    badge.alt = "Outside the conversation"
+    badge.src = url
+    badge.width = 12
+    bar.append(badge)
+  }, privacyFixtureImage)
+  const outside = page.getByRole("img", { name: "Outside the conversation" })
+  await expect(outside).toHaveJSProperty("naturalWidth", 240)
+  await expect(outside).toHaveCSS("filter", "none")
+  await expect
+    .poll(frames)
+    .toEqual(
+      expect.arrayContaining(
+        ["privacy-history", "privacy-attachment.png", "privacy-streamed", "privacy-tool.png", "privacy-other"].map(
+          (name) => ({ name, phase: "loaded", protected: true }),
+        ),
+      ),
+    )
+  const observed = await frames()
+  expect(observed.filter((sample) => !sample.protected)).toEqual([])
+  await test.info().attach("privacy-image-frames", {
+    contentType: "application/json",
+    body: JSON.stringify(observed, null, 2),
+  })
+
+  await toggle.click()
+  await expect(toggle).toHaveAttribute("aria-pressed", "false")
+  await expect(otherImage).toHaveCSS("filter", "none")
+  await expect(otherImage).toHaveAttribute("src", source("other"))
+})
 
 test.describe("static projection", () => {
   test("renders current protocol notices in CLI order", async ({ page }) => {

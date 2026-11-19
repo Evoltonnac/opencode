@@ -422,7 +422,10 @@ export function createComposerModel(adapter: ComposerAdapter, options?: { queue?
     },
     openAttachment(attachment, origin) {
       void controller.previewAttachment(attachment).then((src) => {
-        if (src) dialog.show(() => createComponent(ImagePreview, { src, alt: attachment.filename, origin }))
+        if (src)
+          dialog.show(() =>
+            createComponent(ImagePreview, { src, alt: attachment.filename, origin, sessionImage: true }),
+          )
       })
     },
     readImage(path) {

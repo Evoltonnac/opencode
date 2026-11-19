@@ -710,6 +710,7 @@ export const dict = {
   "session.search.placeholder": "查找...",
   "session.search.noResults": "無匹配",
   "titlebar.tabs": "分頁",
+  "titlebar.blurSessionImages": "模糊對話圖片",
   "settings.tab.experimental": "實驗性",
   "settings.experimental.description": "嘗試實驗性功能",
   "settings.tab.about": "關於",

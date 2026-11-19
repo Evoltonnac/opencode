@@ -762,6 +762,7 @@ export const dict = {
   "session.search.placeholder": "查找...",
   "session.search.noResults": "无匹配项",
   "titlebar.tabs": "标签页",
+  "titlebar.blurSessionImages": "模糊对话图片",
   "settings.tab.experimental": "实验",
   "settings.experimental.description": "尝试实验性功能",
   "settings.tab.about": "关于",

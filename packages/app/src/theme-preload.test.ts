@@ -12,6 +12,7 @@ const setSystemDark = (matches: boolean) =>
 
 beforeEach(() => {
   document.head.innerHTML = ""
+  document.documentElement.removeAttribute("data-session-images-blurred")
   document.documentElement.removeAttribute("data-theme")
   document.documentElement.removeAttribute("data-color-scheme")
   document.documentElement.style.removeProperty("background-color")
@@ -20,6 +21,17 @@ beforeEach(() => {
 })
 
 describe("theme preload", () => {
+  test("restores the chat image preference synchronously before mounting", () => {
+    run()
+    expect(document.documentElement.hasAttribute("data-session-images-blurred")).toBe(false)
+    localStorage.setItem("opencode-session-image-blur", "1")
+    run()
+    expect(document.documentElement.hasAttribute("data-session-images-blurred")).toBe(true)
+    localStorage.setItem("opencode-session-image-blur", "0")
+    run()
+    expect(document.documentElement.hasAttribute("data-session-images-blurred")).toBe(false)
+  })
+
   test.each([
     { stored: undefined, systemDark: false, scheme: "light", background: "#fafafa" },
     { stored: "dark", systemDark: false, scheme: "dark", background: "#080808" },

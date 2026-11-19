@@ -879,6 +879,7 @@ function ComposerAttachments(props: {
                       <Show when={src()} fallback={<div class="w-[78px] h-[52px]" />}>
                         {(value) => (
                           <img
+                            data-slot="composer-attachment-image"
                             src={value()}
                             alt={attachment.filename}
                             class="w-[78px] h-[52px] rounded-[6px] object-cover"

@@ -1,4 +1,12 @@
 ;(function () {
+  // Mirror the browser preference before the app starts or restores a conversation.
+  try {
+    document.documentElement.toggleAttribute(
+      "data-session-images-blurred",
+      localStorage.getItem("opencode-session-image-blur") === "1",
+    )
+  } catch {}
+
   var key = "opencode-theme-id"
   var themeId = localStorage.getItem(key) || "oc-2"
 

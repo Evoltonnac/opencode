@@ -10,6 +10,12 @@ import { Tooltip } from "@opencode/ui/tooltip"
 
 import { useLayout } from "@/shell/state/layout"
 import { usePlatform } from "@/runtime/platform/platform"
+import {
+  restoreSessionImageBlur,
+  saveSessionImageBlur,
+  sessionImageBlurKey,
+  sessionImagesBlurred,
+} from "@/runtime/platform/session-image-blur"
 import { useCommand } from "@/shell/commands/command"
 import { useLanguage } from "@/runtime/i18n/language"
 import { useSettings } from "@/settings/model"
@@ -106,6 +112,22 @@ function SidebarAction(props: {
 export function Titlebar(props: { verticalTabs?: { mount?: HTMLElement } }) {
   const platform = usePlatform()
   const command = useCommand()
+  const [blurImages, setBlurImages] = createSignal(sessionImagesBlurred())
+  const toggleBlurImages = () => {
+    const next = !blurImages()
+    saveSessionImageBlur(next)
+    setBlurImages(next)
+  }
+
+  if (platform.platform === "web") {
+    const syncBlurImages = (event: StorageEvent) => {
+      if (event.storageArea !== localStorage || (event.key !== sessionImageBlurKey && event.key !== null)) return
+      restoreSessionImageBlur()
+      setBlurImages(sessionImagesBlurred())
+    }
+    window.addEventListener("storage", syncBlurImages)
+    onCleanup(() => window.removeEventListener("storage", syncBlurImages))
+  }
   const language = useLanguage()
   const settings = useSettings()
 
@@ -857,6 +879,16 @@ export function Titlebar(props: { verticalTabs?: { mount?: HTMLElement } }) {
                             <div class="flex w-full shrink-0 flex-col gap-[3px]">
                               <Show when={!actionInSidebarHeader()}>{firstSidebarAction()}</Show>
                               {searchButton(true)}
+                              <Show when={platform.platform === "web"}>
+                                <SidebarAction
+                                  action="blur-session-images"
+                                  icon="eye"
+                                  label={language.t("titlebar.blurSessionImages")}
+                                  keybind={[]}
+                                  pressed={blurImages()}
+                                  onClick={toggleBlurImages}
+                                />
+                              </Show>
                               <Show when={projectNavigation()} fallback={newSessionButton()}>
                                 {settingsButton()}
                               </Show>
@@ -896,6 +928,21 @@ export function Titlebar(props: { verticalTabs?: { mount?: HTMLElement } }) {
                 </Show>
                 <Show when={!props.verticalTabs}>
                   <div class="relative z-20 flex shrink-0 items-center justify-end gap-0 overflow-visible">
+                    <Show when={platform.platform === "web"}>
+                      <Tooltip placement={bottom() ? "top" : "bottom"} value={language.t("titlebar.blurSessionImages")}>
+                        <IconButton
+                          type="button"
+                          variant="ghost-muted"
+                          size="large"
+                          class="!w-9 shrink-0 [app-region:no-drag]"
+                          icon={<Icon name="eye" />}
+                          state={blurImages() ? "pressed" : undefined}
+                          aria-label={language.t("titlebar.blurSessionImages")}
+                          aria-pressed={blurImages()}
+                          onClick={toggleBlurImages}
+                        />
+                      </Tooltip>
+                    </Show>
                     <TitlebarItems items={titlebarItems} />
                   </div>
                 </Show>

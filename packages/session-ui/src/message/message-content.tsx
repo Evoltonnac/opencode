@@ -593,7 +593,8 @@ export function CurrentUserMessageDisplay(props: {
                       const src = mediaView().src
                       const origin = event.currentTarget
 
-                      if (src) return dialog.show(() => <ImagePreview src={src} alt={name()} origin={origin} />)
+                      if (src)
+                        return dialog.show(() => <ImagePreview src={src} alt={name()} origin={origin} sessionImage />)
 
                       if (mediaView().canRetry) dispatchMedia({ type: "retry.requested", target: mediaTarget() })
                     }}
