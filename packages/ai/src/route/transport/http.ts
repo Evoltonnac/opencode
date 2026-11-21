@@ -17,6 +17,7 @@ import {
   type LLMRequest,
 } from "../../schema/index.js"
 import { RequestExecutor } from "../executor.js"
+import { encodeImageJsonBytes, isLargeInlineImage } from "../../utils/segmented-json.js"
 
 export type JsonRequestInput<Body> = TransportPrepareInput<Body>
 
@@ -25,6 +26,7 @@ export interface JsonRequestParts<Body = unknown> {
   readonly jsonBody: Body | Record<string, unknown>
   readonly bodyText: string
   readonly deferredBodyText?: true
+  readonly encodeImageBytes?: () => Uint8Array
   readonly headers: Headers.Headers
 }
 
@@ -48,9 +50,11 @@ const unsupportedSnapshot = Symbol("non-JSON request body")
 
 // Copy only containers so later mutations cannot change the fallback body. Scalar strings (including
 // large inline images) remain shared. Exotic objects keep the old eager, exact encoder semantics.
-const snapshotBody = <Body>(body: Body): Body | undefined => {
+const snapshotBody = <Body>(body: Body, requireLargeImage: boolean): Body | undefined => {
+  let hasLargeImage = false
   const ancestors = new Set<object>()
   const copy = (value: unknown, depth: number): unknown => {
+    if (requireLargeImage && !hasLargeImage && isLargeInlineImage(value)) hasLargeImage = true
     if (
       value === null ||
       value === undefined ||
@@ -80,7 +84,8 @@ const snapshotBody = <Body>(body: Body): Body | undefined => {
     return result
   }
   try {
-    return copy(body, 0) as Body
+    const snapshot = copy(body, 0) as Body
+    return requireLargeImage && !hasLargeImage ? undefined : snapshot
   } catch {
     return undefined
   }
@@ -89,6 +94,7 @@ const snapshotBody = <Body>(body: Body): Body | undefined => {
 export const jsonRequestParts = <Body>(
   input: JsonRequestInput<Body>,
   deferBodyText = false,
+  segmentImageBytes = false,
 ): Effect.Effect<JsonRequestParts<Body>, AIError> =>
   Effect.gen(function* () {
     const endpoint = renderEndpoint(input.endpoint, { request: input.request, body: input.body })
@@ -101,7 +107,7 @@ export const jsonRequestParts = <Body>(
       Auth.isBodyIndependent(input.auth) &&
       input.request.http?.body === undefined &&
       input.encodeBody === ProviderShared.encodeJson
-        ? snapshotBody(input.body)
+        ? snapshotBody(input.body, segmentImageBytes)
         : undefined
     const body =
       deferred === undefined ? yield* bodyWithOverlay(input.body, input.request, input.encodeBody) : undefined
@@ -135,6 +141,7 @@ export const jsonRequestParts = <Body>(
         return text()
       },
       deferredBodyText: true,
+      ...(segmentImageBytes && deferred !== undefined ? { encodeImageBytes: () => encodeImageJsonBytes(deferred) } : {}),
       headers,
     } satisfies JsonRequestParts
   })
@@ -154,13 +161,20 @@ export const httpJson = <Body, Frame>(input: HttpJsonInput<Body, Frame>): HttpJs
   with: (patch) => httpJson({ ...input, ...patch }),
   prepare: (prepareInput) =>
     Effect.gen(function* () {
-      const parts = yield* jsonRequestParts({ ...prepareInput })
-      const request = ProviderShared.jsonPost({
-        url: parts.url,
-        body: parts.bodyText,
-        headers: parts.headers,
-        encoding: prepareInput.request.http?.encoding,
-      })
+      const encoding = prepareInput.request.http?.encoding
+      const segment = encoding === undefined || encoding === "none"
+      const parts = yield* jsonRequestParts(prepareInput, segment, segment)
+      const request = parts.encodeImageBytes
+        ? HttpClientRequest.post(parts.url).pipe(
+            HttpClientRequest.setHeaders(parts.headers),
+            HttpClientRequest.bodyUint8Array(parts.encodeImageBytes(), "application/json"),
+          )
+        : ProviderShared.jsonPost({
+            url: parts.url,
+            body: parts.bodyText,
+            headers: parts.headers,
+            encoding,
+          })
       return {
         request,
         framing: input.framing,
