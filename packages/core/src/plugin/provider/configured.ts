@@ -3,9 +3,12 @@ import type { Document, Entry } from "@opencode/schema/config"
 import { Config } from "../../config.js"
 import { Provider } from "../../provider.js"
 
-export const configuredSettings = Effect.fn("ProviderPlugin.configuredSettings")(function* (id: Provider.ID) {
+export const configuredSettings = Effect.fn("ProviderPlugin.configuredSettings")(function* (
+  id: Provider.ID,
+  options?: { readonly catalogDefaults?: boolean },
+) {
   const providers = yield* Provider.Service
-  const current = (yield* providers.get(id))?.settings
+  const current = options?.catalogDefaults === false ? undefined : (yield* providers.get(id))?.settings
   const service = yield* Effect.serviceOption(Config.Service)
   const entries = Option.isSome(service) ? yield* service.value.entries() : []
   return foldSettings(entries, id, current)

@@ -291,7 +291,10 @@ describe("OpenAIPlugin", () => {
       const credentials = yield* Credential.Service
       const bus = yield* Bus.Service
       yield* catalog.transform((editor) => {
-        editor.update(Provider.ID.openai, () => {})
+        editor.update(Provider.ID.openai, (provider) => {
+          // models.dev promotes the common public OpenAI URL to a provider default. It isn't an operator override.
+          provider.settings = { baseURL: "https://api.openai.com/v1" }
+        })
         // The generic catalog no longer adds the deprecated image model.
         editor.models.update(Provider.ID.openai, Model.ID.make("gpt-6-sol"), () => {})
       })

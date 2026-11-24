@@ -264,6 +264,7 @@ export const OpenAIPlugin = define({
     const plan = yield* OpenAISubscriptionModels.track("openai-codex", ctx.provider.reload())
     // Config applies after provider plugins, so read it here: a custom baseURL may not decode zstd.
     const configured = yield* configuredSettings(Provider.ID.openai)
+    const operator = yield* configuredSettings(Provider.ID.openai, { catalogDefaults: false })
     yield* ctx.provider.transform((providers) => {
       const item = providers.get(Provider.ID.openai)
       if (!item) return
@@ -288,7 +289,7 @@ export const OpenAIPlugin = define({
       // Restore only the direct Codex route, never the deprecated public API model.
       if (
         chatgpt &&
-        (configured?.baseURL === undefined || configured.baseURL === codexBaseURL) &&
+        (operator?.baseURL === undefined || operator.baseURL === codexBaseURL) &&
         (plan.current === undefined || plan.current.has(OpenAICodexImage.id))
       ) {
         models.update(Provider.ID.openai, Model.ID.make(OpenAICodexImage.id), (draft) => {
