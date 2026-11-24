@@ -27,10 +27,16 @@ export type Resolved = {
 export const resolve = Effect.fn("cli.server-connection.resolve")(function* (args: Args = {}) {
   const serverFlag = yield* Effect.serviceOption(ServerFlag).pipe(Effect.map(Option.flatten))
   const standaloneFlag = yield* Effect.serviceOption(StandaloneFlag)
-  const server = args.server ?? Option.getOrUndefined(serverFlag)
+  const explicitServer = args.server ?? Option.getOrUndefined(serverFlag)
   const standalone = args.standalone ?? Option.getOrElse(standaloneFlag, () => false)
-  if (server !== undefined && standalone)
+  if (explicitServer !== undefined && standalone)
     return yield* Effect.fail(new Error("--server and --standalone cannot be combined"))
+  const localPort = explicitServer === undefined && !standalone ? yield* Env.localServerPort : undefined
+  if (localPort !== undefined && (!/^\d{1,5}$/.test(localPort) || Number(localPort) < 1 || Number(localPort) > 65_535))
+    return yield* Effect.fail(new Error("OPENCODE_LOCAL_SERVER_PORT must be a TCP port from 1 to 65535"))
+
+  // A configured parent must be reachable; never spawn an independent runtime on failure.
+  const server = explicitServer ?? (localPort === undefined ? undefined : `http://127.0.0.1:${Number(localPort)}`)
   if (server !== undefined) {
     const password = yield* Env.password
     const endpoint = {

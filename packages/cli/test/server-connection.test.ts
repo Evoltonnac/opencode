@@ -2,7 +2,7 @@ import { NodeFileSystem, NodeServices } from "@effect/platform-node"
 import { Global } from "@opencode/util/global"
 import { OPENCODE_VERSION } from "../src/version"
 import { expect, test } from "bun:test"
-import { Console, Effect, FileSystem, Option, Scope } from "effect"
+import { ConfigProvider, Console, Effect, FileSystem, Option, Scope } from "effect"
 import { Command } from "effect/cli"
 import fs from "node:fs/promises"
 import os from "node:os"
@@ -59,6 +59,48 @@ test("resolution groups Effect-native lifecycle operations only for the managed 
     expect(explicit.endpoint.url).toBe(server.url.toString())
     expect(explicit.service).toBeUndefined()
   } finally {
+    await server.stop(true)
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test("an opted-in local CLI reuses its authenticated loopback server without managed lifecycle", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-loopback-resolution-"))
+  const globalLayer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
+  const password = "server-resolution-fixture"
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      if (request.headers.get("authorization") !== `Basic ${btoa(`opencode:${password}`)}`)
+        return Response.json({ _tag: "UnauthorizedError", message: "fixture authorization failed" }, { status: 401 })
+      return Response.json({ version: OPENCODE_VERSION, pid: process.pid, urls: [] })
+    },
+  })
+  const priorPin = process.env.OPENCODE_LOCAL_SERVER_PORT
+  const run = (port: string, credential = password, args: ServerConnection.Args = {}) => {
+    process.env.OPENCODE_LOCAL_SERVER_PORT = port
+    return Effect.runPromise(
+      ServerConnection.resolve(args).pipe(
+        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { OPENCODE_PASSWORD: credential } }))),
+        Effect.provide(globalLayer),
+        Effect.provide(NodeServices.layer),
+        Effect.scoped,
+      ),
+    )
+  }
+
+  try {
+    const localUrl = `http://127.0.0.1:${server.port}`
+    expect((await run(String(server.port))).endpoint.url).toBe(localUrl)
+    expect((await run(String(server.port))).service).toBeUndefined()
+    expect((await run("invalid", password, { server: localUrl })).endpoint.url).toBe(localUrl)
+    for (const value of ["", "0", "65536", "localhost:4096", "+4096"])
+      await expect(run(value)).rejects.toThrow("OPENCODE_LOCAL_SERVER_PORT")
+    await expect(run(String(server.port), "wrong")).rejects.toThrow("rejected the password")
+  } finally {
+    if (priorPin === undefined) delete process.env.OPENCODE_LOCAL_SERVER_PORT
+    else process.env.OPENCODE_LOCAL_SERVER_PORT = priorPin
     await server.stop(true)
     await fs.rm(root, { recursive: true, force: true })
   }
