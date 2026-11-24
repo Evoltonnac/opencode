@@ -74,6 +74,7 @@ const it = testEffect(
           start: () => Effect.die("unused"),
           status: () => Effect.die("unused"),
           result: () => Effect.die("unused"),
+          cancel: () => Effect.die("unused"),
         },
       }),
     ),
@@ -171,7 +172,7 @@ const text = (result: { readonly content?: ReadonlyArray<Tool.Content> }) =>
   result.content?.[0]?.type === "text" ? result.content[0].text : undefined
 const failure = (result: { readonly error?: { readonly message: string } }) => result.error?.message
 
-describe("experimental_image_generate", () => {
+describe("generate_image", () => {
   it.live("is registered only while an image model is available", () =>
     Effect.gen(function* () {
       yield* setup()
@@ -181,6 +182,23 @@ describe("experimental_image_generate", () => {
       const catalog = yield* Provider.Service
       yield* catalog.transform((editor) => editor.models.remove(Provider.ID.make("test"), Model.ID.make("painter")))
       expect(yield* until(false)).toBe(false)
+    }),
+  )
+
+  it.live("does not replace the configured subscribed image model with a different provider", () =>
+    Effect.gen(function* () {
+      yield* imageModel("test", "painter")
+      yield* imageModel("openai", "gpt-image-2", (model) => {
+        model.settings = { baseURL: "https://api.openai.com/v1" }
+      })
+      yield* configure({ model: configuredModel("openai", "gpt-image-2") })
+      const { run } = yield* setup()
+      expect(failure(yield* run({ prompt: "A circle" }))).toContain("No other image provider was used")
+      expect(failure(yield* run({ prompt: "A circle", model: "openai/gpt-image-2" }))).toContain(
+        "No other image provider was used",
+      )
+      expect(fixture.requests).toHaveLength(0)
+      expect(fixture.assertions).toHaveLength(0)
     }),
   )
 
@@ -258,7 +276,7 @@ describe("experimental_image_generate", () => {
       ])
       // The notice carries the job ID from the start result, like shell notices.
       expect(yield* notice(result)).toBe(
-        `<image id="${id}" state="completed">\nImage request finished. Saved image: ${file} (test/painter).\nUse the read tool on this path to view the image.\n</image>`,
+        `<background-result kind="image" id="${id}" state="completed">\nImage request finished. Saved image: ${file} (test/painter).\nUse the read tool on this path to view the image.\n</background-result>`,
       )
       expect((yield* Effect.promise(() => fs.readFile(file))).toString("base64")).toBe(PNG)
       expect(fixture.requests).toEqual([
@@ -270,7 +288,7 @@ describe("experimental_image_generate", () => {
         },
       ])
       expect(fixture.assertions.map((item) => [item.action, item.resources])).toEqual([
-        ["experimental_image_generate", ["test/painter"]],
+        ["generate_image", ["test/painter"]],
         ["edit", ["out.png"]],
         ["read", ["in.png"]],
       ])
@@ -334,7 +352,7 @@ describe("experimental_image_generate", () => {
       })
       const result = yield* run({ prompt: "x", path: "out.png" })
       expect(yield* notice(result)).toBe(
-        `<image id="${result.output.id}" state="error">\nImage request failed for ${path.join(directory, "out")}: The prompt was rejected\n</image>`,
+        `<background-result kind="image" id="${result.output.id}" state="error">\nImage request failed for ${path.join(directory, "out")}: The prompt was rejected\n</background-result>`,
       )
       expect(yield* Effect.promise(() => Bun.file(path.join(directory, "out.png")).exists())).toBe(false)
     }),
@@ -351,7 +369,7 @@ describe("experimental_image_generate", () => {
       expect((yield* jobs.get(id))?.status).toBe("running")
       yield* jobs.cancel(id)
       expect(yield* notice(result)).toBe(
-        `<image id="${id}" state="cancelled">\nImage request for ${path.join(directory, "out")} was cancelled.\n</image>`,
+        `<background-result kind="image" id="${id}" state="cancelled">\nImage request for ${path.join(directory, "out")} was cancelled.\n</background-result>`,
       )
       expect(yield* Effect.promise(() => Bun.file(path.join(directory, "out.png")).exists())).toBe(false)
     }),
@@ -359,7 +377,9 @@ describe("experimental_image_generate", () => {
 
   it.live("queues reference loading behind the active image job and releases on cancellation", () =>
     Effect.gen(function* () {
-      yield* imageModel("test", "painter", (model) => { model.capabilities.input = ["text", "image"] })
+      yield* imageModel("test", "painter", (model) => {
+        model.capabilities.input = ["text", "image"]
+      })
       const { run, notice, directory } = yield* setup()
       const entered = yield* Deferred.make<void>()
       fixture.gate = Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))
@@ -408,9 +428,10 @@ describe("experimental_image_generate", () => {
       yield* Effect.promise(() => fs.writeFile(path.join(directory, "first.jpg"), "existing"))
       const entered = yield* Deferred.make<void>()
       const release = yield* Deferred.make<void>()
-      fixture.permissionGate = (input) => input.action === "edit" && input.resources.includes("first.jpg")
-        ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)))
-        : Effect.void
+      fixture.permissionGate = (input) =>
+        input.action === "edit" && input.resources.includes("first.jpg")
+          ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)))
+          : Effect.void
       const first = yield* run({ prompt: "first", path: "first.png" })
       yield* Deferred.await(entered)
       const second = yield* run({ prompt: "second", path: "second.png" })
@@ -421,6 +442,50 @@ describe("experimental_image_generate", () => {
     }),
   )
 
+  it.live("serializes three overlapping image edits but not output approval", () =>
+    Effect.gen(function* () {
+      yield* imageModel("test", "painter", (model) => {
+        model.capabilities.input = ["text", "image"]
+      })
+      const { run, notice, directory } = yield* setup()
+      yield* Effect.promise(() => fs.writeFile(path.join(directory, "reference.png"), Buffer.from(PNG, "base64")))
+      yield* Effect.promise(() => fs.writeFile(path.join(directory, "first.jpg"), "existing"))
+      fixture.result = { images: [{ type: "image", data: JPEG, mime: "image/jpeg" }] }
+      const startedFirst = yield* Deferred.make<void>()
+      const finishFirst = yield* Deferred.make<void>()
+      const enteredApproval = yield* Deferred.make<void>()
+      const approveOutput = yield* Deferred.make<void>()
+      fixture.gate = Effect.suspend(() =>
+        fixture.requests.length === 1
+          ? Deferred.succeed(startedFirst, undefined).pipe(Effect.andThen(Deferred.await(finishFirst)))
+          : Effect.void,
+      )
+      fixture.permissionGate = (input) =>
+        input.action === "edit" && input.resources.includes("first.jpg")
+          ? Deferred.succeed(enteredApproval, undefined).pipe(Effect.andThen(Deferred.await(approveOutput)))
+          : Effect.void
+      const first = yield* run({ prompt: "first", images: ["reference.png"], path: "first.png" })
+      yield* Deferred.await(startedFirst)
+      const second = yield* run({ prompt: "second", images: ["reference.png"], path: "second.png" })
+      const third = yield* run({ prompt: "third", images: ["reference.png"], path: "third.png" })
+      expect(fixture.requests.map((req) => req.prompt)).toEqual(["first"])
+      const jobs = yield* Job.Service
+      const id = String(first.metadata?.jobID)
+      expect((yield* jobs.get(id))?.type).toBe("generate_image")
+      yield* jobs.cancel(String(second.metadata?.jobID))
+      expect(yield* notice(second)).toContain('state="cancelled"')
+      yield* Deferred.succeed(finishFirst, undefined)
+      yield* Deferred.await(enteredApproval)
+      expect(yield* notice(third)).toContain(path.join(directory, "third.jpg"))
+      expect(yield* Effect.promise(() => fs.readFile(path.join(directory, "third.jpg"), "base64"))).toEqual(JPEG)
+      expect(fixture.requests.map((req) => req.prompt)).toEqual(["first", "third"])
+      expect((yield* jobs.get(id))?.status).toBe("running")
+      yield* Deferred.succeed(approveOutput, undefined)
+      expect(yield* notice(first)).toContain(path.join(directory, "first.jpg"))
+      expect(yield* Effect.promise(() => fs.readFile(path.join(directory, "first.jpg"), "base64"))).toEqual(JPEG)
+    }),
+  )
+
   it.live("starts no job when a permission is denied", () =>
     Effect.gen(function* () {
       yield* imageModel("test", "painter")
@@ -428,7 +493,7 @@ describe("experimental_image_generate", () => {
       fixture.deny = "edit"
       const result = yield* run({ prompt: "x", path: "out.png" })
       expect(result.status).toBe("error")
-      expect(fixture.assertions.map((item) => item.action)).toEqual(["experimental_image_generate", "edit"])
+      expect(fixture.assertions.map((item) => item.action)).toEqual(["generate_image", "edit"])
       expect(fixture.requests).toEqual([])
     }),
   )
@@ -522,7 +587,7 @@ describe("experimental_image_generate", () => {
       const result = yield* run({ prompt: "x", images: ["https://example.invalid/cat.png"] })
       expect(result.status).toBe("error")
       expect(fixture.assertions.map((item) => [item.action, item.resources])).toEqual([
-        ["experimental_image_generate", ["test/painter"]],
+        ["generate_image", ["test/painter"]],
         ["webfetch", ["https://example.invalid/cat.png"]],
       ])
       expect(fixture.requests).toEqual([])

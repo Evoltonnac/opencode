@@ -12,7 +12,13 @@ import {
   type VideoModel,
   type VideoStatus,
 } from "@opencode/ai/effect"
-import type { DecisionRequest, DecisionResult, ImageRequest, ImageResult } from "@opencode/schema/generate"
+import type {
+  DecisionRequest,
+  DecisionResult,
+  ImageRequest,
+  ImageResult,
+  VideoRequest,
+} from "@opencode/schema/generate"
 import { Money } from "@opencode/schema/money"
 import { SessionID } from "@opencode/schema/session-id"
 import { Context, Effect, Layer, Schema, Stream } from "effect"
@@ -39,6 +45,16 @@ export interface VideoInput {
   readonly aspect?: VideoAspectRatio
   readonly resolution?: string
   readonly sound?: boolean
+}
+
+/** A public video request, whose media arrives as inline files. */
+export function videoInput(input: VideoRequest): VideoInput {
+  return {
+    ...input,
+    start: input.start && Media.image(Media.base64(input.start.data, input.start.mime)),
+    end: input.end && Media.image(Media.base64(input.end.data, input.end.mime)),
+    references: input.references?.map((file) => Media.base64(file.data, file.mime)),
+  }
 }
 
 /** A finished video. `stream` downloads it as it is read, so a long video is never held in memory. */
@@ -103,16 +119,18 @@ export type Error =
 
 export interface Interface {
   readonly text: (input: TextInput) => Effect.Effect<string, Error>
-  readonly image: (input: ImageRequest) => Effect.Effect<ImageResult, Error>
+  readonly image: (input: ImageRequest, subscriptionOnly?: boolean) => Effect.Effect<ImageResult, Error>
   readonly decisions: (input: DecisionRequest) => Effect.Effect<DecisionResult, Error>
   /**
-   * A video is a job: `start` submits it and returns the provider's job ID, which `status` and `result` read. `result`
-   * returns every video the job made, at least one.
+   * A video is a job: `start` submits it and returns the provider's job ID, which `status`, `result` and `cancel` read.
+   * `result` returns every video the job made, at least one.
    */
   readonly video: {
     readonly start: (input: VideoInput) => Effect.Effect<{ readonly id: string }, Error>
     readonly status: (model: Model.Ref, id: string) => Effect.Effect<VideoStatus, Error>
     readonly result: (model: Model.Ref, id: string) => Effect.Effect<readonly VideoFile[], Error>
+    /** Fails with `InvalidRequestError` when the provider has no way to cancel a job. */
+    readonly cancel: (model: Model.Ref, id: string) => Effect.Effect<void, Error>
   }
 }
 
@@ -189,10 +207,12 @@ export const layer = Layer.effect(
       })
     })
 
-    const image = Effect.fn("Generate.image")(function* (input: ImageRequest) {
+    const image = Effect.fn("Generate.image")(function* (input: ImageRequest, subscriptionOnly = false) {
       const model = yield* resolver
-        .resolveImage(input.model)
+        .resolveImage(input.model, subscriptionOnly)
         .pipe(Effect.mapError((error) => resolutionError(input.model, "image", error)))
+      if (!model && subscriptionOnly)
+        return yield* new UnavailableError({ message: "The Codex subscription image route is no longer available." })
       if (!model) return yield* missing(input.model, "image")
       // `ai.image.generate` turns an invalid request into a typed error; building it with `ai.image.request` would throw.
       const response = yield* ai.image
@@ -315,7 +335,7 @@ export const layer = Layer.effect(
 
     return Service.of({
       text: (input) => credentials(runText(input)),
-      image: (input) => credentials(image(input)),
+      image: (input, subscriptionOnly) => credentials(image(input, subscriptionOnly)),
       decisions: (input) => credentials(decisions(input)),
       video: {
         // Submitting is paid and not idempotent, so it is never retried.
@@ -331,6 +351,7 @@ export const layer = Layer.effect(
           ),
         status: (model, id) => credentials(video(model, (resolved) => ai.video.status(resolved, id))),
         result: (model, id) => credentials(videoResult(model, id)),
+        cancel: (model, id) => credentials(video(model, (resolved) => ai.video.cancel(resolved, id))),
       },
     })
   }),

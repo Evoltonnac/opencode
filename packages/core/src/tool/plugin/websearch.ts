@@ -1,4 +1,3 @@
-import { PluginHooks } from "../../plugin/hooks.js"
 export * as WebSearchTool from "./websearch.js"
 
 import type { Context } from "@opencode/plugin/effect/plugin"
@@ -32,8 +31,8 @@ const Output = Schema.Array(
   Schema.Struct({
     url: WebSearch.Result.fields.url,
     title: WebSearch.Result.fields.title,
-    content: WebSearch.Result.fields.content,
     published: WebSearch.Result.fields.time.fields.published,
+    content: WebSearch.Result.fields.content,
   }),
 )
 export const Plugin = {
@@ -50,7 +49,10 @@ export const Plugin = {
       .transform((editor) =>
         editor.add({
           name,
-          options: { codemode: flags.resolve(loaded.entries).full_codemode.enabled },
+          // Pinned so quick questions call it without searching the catalog first.
+          options: flags.resolve(loaded.entries).full_codemode.enabled
+            ? { codemode: { pinned: true } }
+            : { codemode: false },
           description,
           input: Input,
           output: Output,
@@ -190,18 +192,5 @@ export const Plugin = {
         }),
       )
       .pipe(Effect.orDie)
-
-    const hook = (event: PluginHooks.PlannedContext) =>
-      Effect.gen(function* () {
-        const disabled = yield* websearch.default().pipe(
-          Effect.as(false),
-          Effect.catchTag("WebSearch.Disabled", () => Effect.succeed(true)),
-        )
-        // Policy can remove every provider, and the model shouldn't be offered a tool that can't search.
-        if (disabled || (yield* websearch.providers()).length === 0) delete event.tools[name]
-      })
-    yield* ctx.session.hook("context", PluginHooks.plannedContext(hook))
-    yield* ctx.session.hook("compaction", hook)
-    yield* ctx.session.hook("generate", hook)
   }),
 }

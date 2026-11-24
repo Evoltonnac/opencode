@@ -1,3 +1,4 @@
+import { OpenAICodexImage } from "../../plugin/provider/openai-codex-image.js"
 export * as ImageGenerateTool from "./image-generate.js"
 
 import path from "path"
@@ -24,7 +25,7 @@ import { SessionMessage } from "../../session/message.js"
 import { SessionSchema } from "../../session/schema.js"
 import { collectBoundedResponseBody } from "../http-body.js"
 
-export const name = "experimental_image_generate"
+export const name = "generate_image"
 export const MAX_INPUT_BYTES = 20 * 1024 * 1024
 const DOWNLOAD_TIMEOUT = Duration.seconds(30)
 const GENERATE_TIMEOUT = Duration.minutes(30)
@@ -95,9 +96,10 @@ export const Plugin = {
       images: boolean,
     ) {
       const available = yield* models.available(["image"])
+      const configured = configuredModel(yield* config.entries())
+      const subscribed = configured?.providerID === "openai" && configured.model === OpenAICodexImage.id
       if (!input) {
-        // A configured default is a preference: when it can't serve this call, pick automatically and say so.
-        const configured = configuredModel(yield* config.entries())
+        // Other configured defaults are preferences: when one can't serve this call, pick automatically and say so.
         const preferred = configured
           ? available.find((model) => model.providerID === configured.providerID && model.id === configured.model)
           : undefined
@@ -105,8 +107,17 @@ export const Plugin = {
           configured?.variant !== undefined &&
           preferred !== undefined &&
           !preferred.variants.some((variant) => variant.id === configured.variant)
-        if (preferred && !variantMissing && (!images || acceptsImages(preferred)))
+        if (
+          preferred &&
+          !variantMissing &&
+          (!images || acceptsImages(preferred)) &&
+          (!subscribed || preferred.settings?.baseURL === OpenAICodexImage.baseURL)
+        )
           return { model: preferred, variant: configured?.variant }
+        if (subscribed)
+          return yield* new ToolFailure({
+            message: "The OpenAI Codex subscription image model is unavailable. No other image provider was used.",
+          })
         const providerID = (yield* ctx.session.get({ sessionID })).model?.providerID
         const model = defaultModel(available, { providerID, images })
         if (!model)
@@ -136,6 +147,15 @@ export const Plugin = {
         return yield* new ToolFailure({
           message: `Model "${ref.providerID}/${ref.id}" is not an available image model. Use the models tool with type: "image" to see what is available.`,
         })
+      if (
+        subscribed &&
+        ref.providerID === "openai" &&
+        ref.id === OpenAICodexImage.id &&
+        model.settings?.baseURL !== OpenAICodexImage.baseURL
+      )
+        return yield* new ToolFailure({
+          message: "The OpenAI Codex subscription image model is unavailable. No other image provider was used.",
+        })
       if (ref.variant !== undefined && !model.variants.some((variant) => variant.id === ref.variant))
         return yield* new ToolFailure({
           message:
@@ -162,28 +182,43 @@ export const Plugin = {
     ) {
       const remote = /^https?:\/\//i.test(source)
       const target = remote ? undefined : yield* access.authorizeRead(source, context)
-      if (remote) yield* permission.assert({
-        action: "webfetch", resources: [source], save: ["*"],
-        metadata: { url: source }, ...Permission.invocation(context),
-      })
+      if (remote)
+        yield* permission.assert({
+          action: "webfetch",
+          resources: [source],
+          save: ["*"],
+          metadata: { url: source },
+          ...Permission.invocation(context),
+        })
       return Effect.gen(function* () {
         const bytes = target
           ? yield* Effect.gen(function* () {
-              const info = yield* environment.files.stat(target.absolute).pipe(
-                Effect.catchTag("Environment.NotFound", () => new ToolFailure({ message: `File not found: ${source}` })),
-              )
+              const info = yield* target.environment.files
+                .stat(target.absolute)
+                .pipe(
+                  Effect.catchTag(
+                    "Environment.NotFound",
+                    () => new ToolFailure({ message: `File not found: ${source}` }),
+                  ),
+                )
               if (info.size > MAX_INPUT_BYTES)
                 return yield* new ToolFailure({ message: `${source} is larger than 20 MiB.` })
-              return (yield* environment.files.read(target.absolute)).bytes
+              return (yield* target.environment.files.read(target.absolute)).bytes
             })
           : yield* Effect.gen(function* () {
-              const response = yield* http.execute(HttpClientRequest.get(source))
+              const response = yield* http
+                .execute(HttpClientRequest.get(source))
                 .pipe(Effect.flatMap(HttpClientResponse.filterStatusOk))
-              return yield* collectBoundedResponseBody(response, MAX_INPUT_BYTES,
-                () => new ToolFailure({ message: `${source} is larger than 20 MiB.` }))
+              return yield* collectBoundedResponseBody(
+                response,
+                MAX_INPUT_BYTES,
+                () => new ToolFailure({ message: `${source} is larger than 20 MiB.` }),
+              )
             }).pipe(
-              Effect.timeoutOrElse({ duration: DOWNLOAD_TIMEOUT,
-                orElse: () => Effect.fail(new ToolFailure({ message: `Timed out downloading ${source}.` })), }),
+              Effect.timeoutOrElse({
+                duration: DOWNLOAD_TIMEOUT,
+                orElse: () => Effect.fail(new ToolFailure({ message: `Timed out downloading ${source}.` })),
+              }),
               Effect.mapError(toolFailure(`Unable to download ${source}`)),
             )
         const mime = Mime.detectMedia(bytes)
@@ -254,12 +289,15 @@ export const Plugin = {
               const resolved = yield* resolveModel(input.model, context.sessionID, input.images !== undefined)
               const model = resolved.model
               const variant = resolved.variant
+              const subscriptionOnly =
+                model.providerID === "openai" && model.settings?.baseURL === OpenAICodexImage.baseURL
               const ref = `${model.providerID}/${model.id}${variant ? `#${variant}` : ""}`
               const target = input.path ? yield* access.resolve({ path: input.path, kind: "file" }) : undefined
               // The extension the image is saved with follows its real format, whatever the requested path ends in.
               const stem = target
                 ? target.absolute.slice(0, target.absolute.length - path.extname(target.absolute).length)
                 : path.join(global.tmp, "images", context.sessionID, `image_${Identifier.create(false)}`)
+              const files = target?.environment.files ?? environment.files
 
               yield* permission.assert({
                 action: name,
@@ -273,7 +311,7 @@ export const Plugin = {
                 yield* permission.assert({
                   action: "edit",
                   resources: [target.resource],
-                  save: ["*"],
+                  save: [FileAccess.always(target)],
                   ...Permission.invocation(context),
                 })
               }
@@ -283,27 +321,32 @@ export const Plugin = {
 
               // Initial permissions are resolved above; loading and generation run inside the queued background job.
               const run = Effect.gen(function* () {
-                const image = yield* imageGenerationQueue.withPermit(Effect.gen(function* () {
-                const images = preparedImages ? yield* Effect.all(preparedImages, { concurrency: 1 }) : undefined
-                const result = yield* generate
-                  .image({
-                    model: Model.Ref.make({
-                      providerID: model.providerID,
-                      id: model.id,
-                      ...(variant ? { variant } : {}),
-                    }),
-                    prompt: input.prompt,
-                    n: 1,
-                    ...(images ? { images } : {}),
-                  })
-                  .pipe(
-                    Effect.timeoutOrElse({
-                      duration: GENERATE_TIMEOUT,
-                      orElse: () => Effect.fail(new Error("Image generation timed out after 30 minutes.")),
-                    }),
-                  )
-                return result.images[0]
-                }))
+                const image = yield* imageGenerationQueue.withPermit(
+                  Effect.gen(function* () {
+                    const images = preparedImages ? yield* Effect.all(preparedImages, { concurrency: 1 }) : undefined
+                    const result = yield* generate
+                      .image(
+                        {
+                          model: Model.Ref.make({
+                            providerID: model.providerID,
+                            id: model.id,
+                            ...(variant ? { variant } : {}),
+                          }),
+                          prompt: input.prompt,
+                          n: 1,
+                          ...(images ? { images } : {}),
+                        },
+                        subscriptionOnly,
+                      )
+                      .pipe(
+                        Effect.timeoutOrElse({
+                          duration: GENERATE_TIMEOUT,
+                          orElse: () => Effect.fail(new Error("Image generation timed out after 30 minutes.")),
+                        }),
+                      )
+                    return result.images[0]
+                  }),
+                )
                 // Release the memory-heavy generation slot before any extra output-file approval.
                 if (!image) return yield* Effect.fail(new Error(`${ref} returned no image.`))
                 const bytes = Buffer.from(image.data, "base64")
@@ -313,7 +356,7 @@ export const Plugin = {
                 // approval; a new file only has to pass the deny rules.
                 if (target && file !== target.absolute) {
                   const actual = yield* access.resolve({ path: file, kind: "file" })
-                  const replaces = yield* environment.files.stat(file).pipe(
+                  const replaces = yield* files.stat(file).pipe(
                     Effect.as(true),
                     Effect.catchTag("Environment.NotFound", () => Effect.succeed(false)),
                   )
@@ -322,9 +365,11 @@ export const Plugin = {
                     resources: [actual.resource],
                     ...Permission.invocation(context),
                   }
-                  yield* replaces ? permission.assert({ ...request, save: ["*"] }) : permission.assertNotDenied(request)
+                  yield* replaces
+                    ? permission.assert({ ...request, save: [FileAccess.always(actual)] })
+                    : permission.assertNotDenied(request)
                 }
-                yield* environment.files.write(file, bytes)
+                yield* files.write(file, bytes)
                 return `Image request finished. Saved image: ${file} (${ref}).\nUse the read tool on this path to view the image.`
               }).pipe(
                 // The job keeps this text, so a restart can still deliver the outcome.

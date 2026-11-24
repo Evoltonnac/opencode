@@ -1,3 +1,4 @@
+import { OpenAICodexImage } from "./plugin/provider/openai-codex-image.js"
 export * as ModelResolver from "./model-resolver.js"
 
 import { makeLocationNode } from "@opencode/util/effect/app-node"
@@ -153,7 +154,7 @@ export interface Interface {
   readonly fallback: () => Effect.Effect<Info | undefined>
   readonly resolveModel: (model: Info, variant?: VariantID) => Effect.Effect<Resolved, Error>
   /** An enabled image model by ref, or undefined when no image model has that ref. */
-  readonly resolveImage: (ref: Ref) => Effect.Effect<ImageModel | undefined, MediaError>
+  readonly resolveImage: (ref: Ref, subscriptionOnly?: boolean) => Effect.Effect<ImageModel | undefined, MediaError>
   /** An enabled video model by ref, or undefined when no video model has that ref. */
   readonly resolveVideo: (ref: Ref) => Effect.Effect<VideoModel | undefined, MediaError>
   /** An enabled decision model by ref, or undefined when no decision model has that ref. */
@@ -320,6 +321,7 @@ const fromCatalogMedia = Effect.fn("ModelResolver.fromCatalogMedia")(function* <
   dependencies?: Dependencies,
 ) {
   const { resolved, configured, module, settings } = yield* loadCatalogPackage(model, credential, dependencies)
+  const timeouts = Provider.timeouts(configured)
   const tls = Provider.tls(configured)
   const runtime: unknown = yield* Effect.try({
     try: () => module.model(resolved.modelID ?? resolved.id, settings),
@@ -335,10 +337,14 @@ const fromCatalogMedia = Effect.fn("ModelResolver.fromCatalogMedia")(function* <
         })
       : runtime
   if (!is(adapted)) return yield* unsupported(resolved)
-  if (!tls || !(adapted instanceof DecisionModel || adapted instanceof ImageModel)) return adapted
+  if (!(adapted instanceof DecisionModel || adapted instanceof ImageModel || adapted instanceof VideoModel))
+    return adapted
   // Media and decision models are plain classes with readonly fields, so copy onto the same prototype.
   const copy: Runtime = Object.assign(Object.create(Object.getPrototypeOf(adapted)), adapted, {
-    http: { ...adapted.http, tls },
+    transport: mergeTransport(adapted.transport, {
+      timeout: { total: timeouts.timeout, headers: timeouts.headerTimeout, chunk: timeouts.chunkTimeout },
+      http: { tls },
+    }),
   })
   return copy
 })
@@ -524,12 +530,22 @@ export const layer = Layer.effect(
       ref: Ref,
       type: Model.Type,
       is: (value: unknown) => value is Runtime,
+      subscriptionOnly = false,
     ) {
       const info = (yield* models.available([type])).find(
         (model) => model.providerID === ref.providerID && model.id === ref.id,
       )
       if (!info) return undefined
       const { provider, credential, runtimeInfo } = yield* prepare(info, ref.variant)
+      // A queued tool job can observe a new active credential. Never send a subscribed image job to the API
+      // or with a replacement API key if the connection changed after the tool selected its model.
+      if (
+        subscriptionOnly &&
+        (info.providerID !== Provider.ID.openai ||
+          runtimeInfo.settings?.baseURL !== OpenAICodexImage.baseURL ||
+          !OpenAICodexImage.subscribed(credential))
+      )
+        return undefined
       // Same no-key rule as chat in `load`. A built image or decision model can't have its auth swapped like chat,
       // so the package gets `apiKey: false` up front and builds the model without auth.
       const keyless =
@@ -557,8 +573,8 @@ export const layer = Layer.effect(
       }),
       fallback,
       resolveModel: load,
-      resolveImage: Effect.fn("ModelResolver.resolveImage")(function* (ref) {
-        return yield* loadMedia(ref, "image", isImageModel)
+      resolveImage: Effect.fn("ModelResolver.resolveImage")(function* (ref, subscriptionOnly = false) {
+        return yield* loadMedia(ref, "image", isImageModel, subscriptionOnly)
       }),
       resolveVideo: Effect.fn("ModelResolver.resolveVideo")(function* (ref) {
         return yield* loadMedia(ref, "video", isVideoModel)

@@ -190,6 +190,29 @@ export const decodeMessageRowsWithRefs = Effect.fnUntraced(function* (
   )
 })
 
+// Both canonical and stored-reference readers must apply the same logical history boundary.
+const filterEntries = Effect.fnUntraced(function* <M extends SessionStored.Message>(
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+  boundary: Boundary,
+  entries: ReadonlyArray<{ readonly seq: number; readonly message: M }>,
+) {
+  // Re-expansion may cross a native checkpoint whose completion already advanced the instruction
+  // epoch: the baseline supersedes the chronological updates before it. Forks seed their baseline
+  // at sequence 0 but retain parent sequences, so the copied checkpoint still retires them.
+  const native = entries.findLast((entry) => isNativeCompaction(entry.message))
+  // The instruction baseline covers every update before its epoch. A committed revert that removes an
+  // update clears the state, so the next baseline is rendered fresh and covers every surviving update.
+  const epoch = (yield* InstructionState.epochStart(db, sessionID)) ?? Number.POSITIVE_INFINITY
+  // Skipped native checkpoints are not textual summaries. Their original transcript remains available.
+  return entries.filter(
+    (entry) =>
+      !(entry.message.type === "system" && native && entry.seq < native.seq) &&
+      !(entry.message.type === "system" && entry.message.metadata?.notice === "instructions" && entry.seq < epoch) &&
+      replayable(entry.message, boundary),
+  )
+})
+
 const messageEntries = Effect.fnUntraced(function* (
   db: DatabaseService,
   sessionID: SessionSchema.ID,
@@ -222,20 +245,7 @@ const messageEntries = Effect.fnUntraced(function* (
   if (compaction && start && !replayable(start.message, boundary))
     return yield* messageEntries(db, sessionID, boundary, compaction.seq)
   const entries = compaction ? yield* withRecentText(db, sessionID, decoded) : decoded
-  // Re-expansion may cross a native checkpoint whose completion already advanced the instruction
-  // epoch: the baseline supersedes the chronological updates before it. Forks seed their baseline
-  // at sequence 0 but retain parent sequences, so the copied checkpoint still retires them.
-  const native = entries.findLast((entry) => isNativeCompaction(entry.message))
-  // The instruction baseline covers every update before its epoch. A committed revert that removes an
-  // update clears the state, so the next baseline is rendered fresh and covers every surviving update.
-  const epoch = (yield* InstructionState.epochStart(db, sessionID)) ?? Number.POSITIVE_INFINITY
-  // Skipped native checkpoints are not textual summaries. Their original transcript remains available.
-  return entries.filter(
-    (entry) =>
-      !(entry.message.type === "system" && native && entry.seq < native.seq) &&
-      !(entry.message.type === "system" && entry.message.metadata?.notice === "instructions" && entry.seq < epoch) &&
-      replayable(entry.message, boundary),
-  )
+  return yield* filterEntries(db, sessionID, boundary, entries)
 })
 
 /**
@@ -325,18 +335,7 @@ const modelEntries = Effect.fnUntraced(function* (
   if (compaction && start && !replayable(start.message, boundary))
     return yield* modelEntries(db, sessionID, boundary, compaction.seq)
   const entries = compaction ? yield* withRecentText(db, sessionID, decoded) : decoded
-  // Re-expansion may cross a native checkpoint whose completion already advanced the instruction
-  // epoch: the baseline supersedes the chronological updates before it. Forks seed their baseline
-  // at sequence 0 but retain parent sequences, so the copied checkpoint still retires them.
-  const native = entries.findLast((entry) => isNativeCompaction(entry.message))
-  // Skipped native checkpoints are not textual summaries. Their original transcript remains available.
-  return {
-    media,
-    entries: entries.filter(
-      (entry) =>
-        !(entry.message.type === "system" && native && entry.seq < native.seq) && replayable(entry.message, boundary),
-    ),
-  }
+  return { media, entries: yield* filterEntries(db, sessionID, boundary, entries) }
 })
 
 export const entriesForRunner = Effect.fn("SessionHistory.entriesForRunner")(function* (

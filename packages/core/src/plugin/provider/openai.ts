@@ -7,6 +7,7 @@ import type { Server } from "node:http"
 import { App } from "../../app.js"
 import { Credential } from "../../credential.js"
 import { Integration } from "../../integration.js"
+import { Model } from "../../model.js"
 import { OauthCallbackPage } from "../../oauth/page.js"
 import { OauthRedirect } from "../../oauth/redirect.js"
 import { Provider } from "../../provider.js"
@@ -14,6 +15,8 @@ import { SessionAffinity } from "../../session/affinity.js"
 import type { PluginInternal } from "../internal.js"
 import { configuredSettings } from "./configured.js"
 import { storedCredential } from "./credential-settings.js"
+import { OpenAICodexImage } from "./openai-codex-image.js"
+import { OpenAISubscriptionModels } from "./openai-subscription-models.js"
 import { ProviderRefresh } from "./refresh.js"
 
 const clientID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -23,13 +26,14 @@ const callbackFallbackPort = 1457
 const callbackBindAttempts = 10
 const callbackBindRetryDelay = 200
 const pollingSafetyMargin = 3000
-const codexBaseURL = "https://chatgpt.com/backend-api/codex"
+const codexBaseURL = OpenAICodexImage.baseURL
 const browserMethodID = Integration.MethodID.make("chatgpt-browser")
 const headlessMethodID = Integration.MethodID.make("chatgpt-headless")
-// Codex rejects gpt-5.5 and older models, including gpt-5.3-codex-spark, for ChatGPT accounts.
+// Used when the catalog has no Codex list: Codex rejects gpt-5.5 and older models, including gpt-5.3-codex-spark,
+// for ChatGPT accounts.
 const codexDisallowed = new Set(["gpt-5.6"])
 // The image models the Codex client generates and edits with on the Codex login.
-const codexImageModels = new Set(["gpt-image-2"])
+const codexImageModels = new Set([OpenAICodexImage.id])
 
 type Pkce = {
   verifier: string
@@ -244,11 +248,7 @@ export const OpenAIPlugin = define({
     const load = Effect.fn("OpenAIPlugin.load")(function* () {
       const { credential } = yield* storedCredential(ctx, "openai")
       const previous = chatgpt
-      chatgpt =
-        credential?.type === "oauth" &&
-        (credential.methodID === browserMethodID || credential.methodID === headlessMethodID)
-          ? credential
-          : undefined
+      chatgpt = OpenAICodexImage.subscribed(credential)
       return (
         (previous === undefined) !== (chatgpt === undefined) ||
         previous?.metadata?.accountID !== chatgpt?.metadata?.accountID
@@ -260,6 +260,8 @@ export const OpenAIPlugin = define({
       editor.method.update(headless(ctx.app))
     })
     yield* load()
+    // Temporary: the Codex list from models.dev, see openai-subscription-models.ts.
+    const plan = yield* OpenAISubscriptionModels.track("openai-codex", ctx.provider.reload())
     // Config applies after provider plugins, so read it here: a custom baseURL may not decode zstd.
     const configured = yield* configuredSettings(Provider.ID.openai)
     yield* ctx.provider.transform((providers) => {
@@ -282,11 +284,36 @@ export const OpenAIPlugin = define({
       })
     })
     yield* ctx.model.transform((models) => {
+      // The generic OpenAI API entry may be deprecated before the Codex subscription stops serving it.
+      // Restore only the direct Codex route, never the deprecated public API model.
+      if (
+        chatgpt &&
+        (configured?.baseURL === undefined || configured.baseURL === codexBaseURL) &&
+        (plan.current === undefined || plan.current.has(OpenAICodexImage.id))
+      ) {
+        models.update(Provider.ID.openai, Model.ID.make(OpenAICodexImage.id), (draft) => {
+          draft.type = "image"
+          draft.package = "@opencode/ai/providers/openai/images"
+          draft.settings = Provider.mergeOverlay(draft.settings, { baseURL: codexBaseURL })
+          draft.capabilities = {
+            tools: false,
+            input: ["text", "image/jpeg", "image/png", "image/webp"],
+            output: ["image/png", "image/jpeg", "image/webp"],
+          }
+          draft.limit = { context: 0, input: 0, output: 0 }
+          draft.cost = []
+        })
+      }
       for (const model of models.list(Provider.ID.openai)) {
         // ChatGPT-plan tokens only authorize codex-eligible models, and the
         // subscription covers usage, so hide the rest and zero the cost.
         models.update(model.providerID, model.id, (draft) => {
           if (!chatgpt) return
+          if (plan.current) {
+            if (plan.current.has(draft.id)) draft.cost = []
+            else draft.enabled = false
+            return
+          }
           if (Schema.is(Schema.Struct({ mode: Schema.Literal("pro") }))(draft.body?.reasoning)) {
             draft.enabled = false
             return

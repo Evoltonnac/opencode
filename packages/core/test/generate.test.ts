@@ -276,7 +276,15 @@ testEffect(Layer.empty).effect("attributes each stateless completion without cre
 )
 
 describe("image and decision generation", () => {
+  const codexURL = "https://chatgpt.com/backend-api/codex"
+  const codex = { useApiKey: false }
   const catalog = [
+    Info.make({
+      ...Info.default(Provider.ID.openai, ID.make("gpt-image-2")),
+      type: "image",
+      package: "@opencode/ai/providers/openai/images",
+      settings: { baseURL: codexURL },
+    }),
     Info.make({
       ...Info.default(Provider.ID.openai, ID.make("gpt-image-1-mini")),
       type: "image",
@@ -323,7 +331,7 @@ describe("image and decision generation", () => {
         Provider.Info.make({
           ...Provider.Info.empty(providerID),
           activation: "enabled",
-          settings: 
+          settings:
             // A local host like LM Studio is enabled with no key.
             providerID === "lmstudio"
               ? { baseURL: "http://127.0.0.1:1234/v1", provider: "lmstudio", apiKey: "" }
@@ -341,6 +349,7 @@ describe("image and decision generation", () => {
     available: (types) => Effect.succeed(catalog.filter((model) => (types ?? ["chat"]).includes(model.type ?? "chat"))),
   })
   // An OpenCode Console login keeps its server and organization as credential metadata.
+  let useCodexCredential = false
   const mediaIntegrations = Layer.mock(Integration.Service, {
     revision: () => 0,
     connection: {
@@ -353,18 +362,35 @@ describe("image and decision generation", () => {
                 label: "Acme",
                 method: "oauth",
               })
-            : undefined,
+            : id === Integration.ID.make("openai") && useCodexCredential
+              ? IntegrationConnection.CredentialInfo.make({
+                  type: "credential",
+                  id: Credential.ID.make("codex"),
+                  label: "Mock OpenAI",
+                  method: "oauth",
+                })
+              : undefined,
         ),
-      resolve: () =>
+      resolve: (connection) =>
         Effect.succeed(
-          Credential.OAuth.make({
-            type: "oauth",
-            methodID: Integration.MethodID.make("device"),
-            access: "console-token",
-            refresh: "refresh",
-            expires: Number.MAX_SAFE_INTEGER,
-            metadata: { server: "https://console.example", orgID: "org_123", orgName: "Acme" },
-          }),
+          connection.type === "credential" && connection.id === Credential.ID.make("codex")
+            ? codex.useApiKey
+              ? Credential.Key.make({ type: "key", key: "do-not-send" })
+              : Credential.OAuth.make({
+                  type: "oauth",
+                  methodID: Integration.MethodID.make("chatgpt-headless"),
+                  access: "mock-codex-token",
+                  refresh: "unused",
+                  expires: Number.MAX_SAFE_INTEGER,
+                })
+            : Credential.OAuth.make({
+                type: "oauth",
+                methodID: Integration.MethodID.make("device"),
+                access: "console-token",
+                refresh: "refresh",
+                expires: Number.MAX_SAFE_INTEGER,
+                metadata: { server: "https://console.example", orgID: "org_123", orgName: "Acme" },
+              }),
         ),
       key: () => Effect.die("unused"),
       external: () => Effect.die("unused"),
@@ -398,11 +424,20 @@ describe("image and decision generation", () => {
             request,
             Response.json({ created: 1, data: [{ url: "https://images.example/fox" }] }),
           )
+        if (request.url === `${codexURL}/images/generations`)
+          return HttpClientResponse.fromWeb(request, Response.json({ data: [{ b64_json: "aW1hZ2U=" }] }))
         if (request.url === "https://api.openai.com/v1/images/generations")
           return HttpClientResponse.fromWeb(
             request,
             Response.json({
-              data: [{ b64_json: text && JSON.parse(text).prompt.startsWith("codec:") ? JSON.parse(text).prompt.slice(6) : "aW1hZ2U=" }],
+              data: [
+                {
+                  b64_json:
+                    text && JSON.parse(text).prompt.startsWith("codec:")
+                      ? JSON.parse(text).prompt.slice(6)
+                      : "aW1hZ2U=",
+                },
+              ],
               output_format: "png",
               usage: { input_tokens: 9, output_tokens: 272 },
             }),
@@ -468,6 +503,34 @@ describe("image and decision generation", () => {
         tokens: { input: 9, output: 272 },
       })
     }),
+  )
+
+  mediaIt.effect("fences subscribed image requests against a changed active credential", () =>
+    Effect.gen(function* () {
+      requests.length = 0
+      useCodexCredential = true
+      const generate = yield* Generate.Service
+      const input = { model: ref("openai", "gpt-image-2"), prompt: "A black circle" }
+      yield* generate.image(input, true)
+      expect(requests).toHaveLength(1)
+      expect(requests[0]).toMatchObject({
+        url: `${codexURL}/images/generations`,
+        headers: { authorization: "Bearer mock-codex-token" },
+        body: { model: "gpt-image-2", prompt: "A black circle" },
+      })
+      // The catalog still has the subscribed entry while the active integration has switched to a key.
+      codex.useApiKey = true
+      const denied = yield* generate.image(input, true).pipe(Effect.flip)
+      expect(denied._tag).toBe("Generate.UnavailableError")
+      expect(requests).toHaveLength(1)
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          useCodexCredential = false
+          codex.useApiKey = false
+        }),
+      ),
+    ),
   )
 
   for (const invalid of ["AQ", "AQ-_", "AQ I", "A=ID", "%%%%"]) {
